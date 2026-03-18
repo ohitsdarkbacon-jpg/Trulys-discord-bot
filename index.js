@@ -137,5 +137,10 @@ client.on('interactionCreate', async interaction => {
 client.once('ready', () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
 });
-
+console.log('=== DEBUG: BOT_TOKEN check ===');
+console.log('BOT_TOKEN exists?', !!process.env.BOT_TOKEN);
+console.log('BOT_TOKEN length:', process.env.BOT_TOKEN?.length ?? 'undefined');
+console.log('BOT_TOKEN first 10 chars:', process.env.BOT_TOKEN?.slice(0, 10) ?? 'undefined');
+console.log('BOT_TOKEN last 10 chars:', process.env.BOT_TOKEN?.slice(-10) ?? 'undefined');
+console.log('=== END DEBUG ===');
 client.login(process.env.BOT_TOKEN);

@@ -30,13 +30,13 @@ const USERS_FILE = './users.json';
 let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 
 const MAX_SLOTS = 6;
-let globalSlots = []; // stores { userId, key, expiry }
+let globalSlots = []; // { userId, key, expiry }
 
 function saveUsers() {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
-// ================= COMMAND REGISTRATION =================
+// ================= COMMANDS =================
 const commands = [
   new SlashCommandBuilder()
     .setName('panel')
@@ -71,7 +71,7 @@ async function registerCommands() {
 
 // ================= LUARMOR KEY =================
 async function createLuarmorKey(hours) {
-  const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
+  const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
   try {
     const response = await axios.post(
@@ -80,31 +80,29 @@ async function createLuarmorKey(hours) {
       { headers: { Authorization: process.env.LUARMOR_API_KEY } }
     );
 
-    // Automatically find the key in the response
-    const findKeyRecursively = (obj) => {
-      if (typeof obj === 'string') {
-        if (obj.match(/^[A-Za-z0-9]{6,}$/)) return obj; // likely the key
-      } else if (typeof obj === 'object' && obj !== null) {
+    // Recursively find any string that looks like a key
+    const findKey = (obj) => {
+      if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
+      if (typeof obj === 'object' && obj !== null) {
         for (const value of Object.values(obj)) {
-          const result = findKeyRecursively(value);
+          const result = findKey(value);
           if (result) return result;
         }
       }
       return null;
     };
 
-    const key = findKeyRecursively(response.data);
+    const key = findKey(response.data);
     if (!key) throw new Error('Key not found in response');
 
-    return key;
-
+    return { key, expiry: expiryUnix };
   } catch (err) {
     console.error('Luarmor key generation error:', err.response?.data || err.message);
     throw new Error('Failed to generate Luarmor key');
   }
 }
 
-// ================= GLOBAL SLOTS UI =================
+// ================= SLOT UI =================
 function generateSlotsEmbed(client) {
   const embed = new EmbedBuilder()
     .setTitle('🎟️ Global Slot Status')
@@ -114,7 +112,11 @@ function generateSlotsEmbed(client) {
     const slot = globalSlots[i];
     if (slot) {
       const user = client.users.cache.get(slot.userId);
-      embed.addFields({ name: `Slot ${i + 1}`, value: `✅ Taken by ${user ? user.tag : 'Unknown'}` });
+      const remainingHours = Math.max(0, Math.floor((slot.expiry * 1000 - Date.now()) / 3600000));
+      embed.addFields({
+        name: `Slot ${i + 1}`,
+        value: `✅ Taken by ${user ? user.tag : 'Unknown'}\n⏱ Remaining: ${remainingHours}h`
+      });
     } else {
       embed.addFields({ name: `Slot ${i + 1}`, value: '🟢 Available' });
     }
@@ -211,12 +213,12 @@ client.on('interactionCreate', async interaction => {
   const hours = creditsToSpend * 2;
 
   try {
-    const key = await createLuarmorKey(hours);
+    const { key, expiry } = await createLuarmorKey(hours);
 
     globalSlots.push({
       userId: interaction.user.id,
       key,
-      expiry: Date.now() + hours * 3600000
+      expiry
     });
 
     userData.credits -= creditsToSpend;
@@ -231,11 +233,11 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ================= AUTO CLEANUP EXPIRED SLOTS =================
+// ================= CLEANUP =================
 setInterval(() => {
-  const now = Date.now();
+  const now = Math.floor(Date.now() / 1000);
   globalSlots = globalSlots.filter(slot => slot.expiry > now);
-}, 60000); // every 1 minute
+}, 60000); // every minute
 
 // ================= READY =================
 client.once('ready', async () => {

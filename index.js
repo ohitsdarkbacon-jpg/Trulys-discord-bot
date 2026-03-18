@@ -74,7 +74,6 @@ async function createLuarmorKey(discordId, hours) {
 
   await axios.post(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`, {
     auth_expire: expiryUnix,
-    discord_id: discordId
   }, {
     headers: { Authorization: process.env.LUARMOR_API_KEY }
   });

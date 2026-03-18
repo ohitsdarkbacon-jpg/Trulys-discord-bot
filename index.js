@@ -1,5 +1,19 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  REST,
+  Routes,
+  SlashCommandBuilder
+} = require('discord.js');
+
 const axios = require('axios');
 const fs = require('fs');
 const https = require('https');
@@ -14,37 +28,52 @@ const client = new Client({
 });
 
 const USERS_FILE = './users.json';
-let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
+let users = fs.existsSync(USERS_FILE)
+  ? JSON.parse(fs.readFileSync(USERS_FILE))
+  : {};
 
-// Save users function
 function saveUsers() {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
-// Fetch and log current outbound IP
-function logOutboundIP() {
-  https.get('https://api.ipify.org?format=json', (res) => {
-    let data = '';
-    res.on('data', (chunk) => { data += chunk; });
-    res.on('end', () => {
-      try {
-        const ipData = JSON.parse(data);
-        console.log('====================================');
-        console.log('CURRENT OUTBOUND IP:', ipData.ip);
-        console.log('Check this IP in your Luarmor whitelist');
-        console.log('====================================');
-      } catch (e) {
-        console.error('Failed to parse outbound IP:', e.message);
-      }
-    });
-  }).on('error', (e) => {
-    console.error('Outbound IP check failed:', e.message);
-  });
+// ================= COMMAND REGISTRATION =================
+const commands = [
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Open admin panel'),
+
+  new SlashCommandBuilder()
+    .setName('givecredits')
+    .setDescription('Give credits to a user')
+    .addUserOption(option =>
+      option.setName('user').setDescription('Target user').setRequired(true))
+    .addIntegerOption(option =>
+      option.setName('amount').setDescription('Credits amount').setRequired(true))
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+
+async function registerCommands() {
+  try {
+    console.log('⏳ Registering commands...');
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      { body: commands }
+    );
+    console.log('✅ Commands registered!');
+  } catch (err) {
+    console.error(err);
+  }
 }
+// =======================================================
 
 // Luarmor key generator
 async function createLuarmorKey(discordId, hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
+
   await axios.post(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`, {
     auth_expire: expiryUnix,
     discord_id: discordId
@@ -60,9 +89,9 @@ async function createLuarmorKey(discordId, hours) {
   return keyData?.key || "ERROR_RETRIEVING_KEY";
 }
 
-// Panel command (admin only)
+// ================= COMMAND HANDLER =================
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'panel' && process.env.ADMIN_IDS.includes(interaction.user.id)) {
     const embed = new EmbedBuilder()
@@ -70,11 +99,10 @@ client.on('interactionCreate', async interaction => {
       .setDescription('1 Credit = 1€ = 2 Hours\nMax 6 slots per user')
       .setColor(0x00ff00);
 
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder().setCustomId('get_credits').setLabel('🛒 Get Credits').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('activate_slot').setLabel('⚡ Activate Slot').setStyle(ButtonStyle.Success)
-      );
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('get_credits').setLabel('🛒 Get Credits').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('activate_slot').setLabel('⚡ Activate Slot').setStyle(ButtonStyle.Success)
+    );
 
     await interaction.reply({ embeds: [embed], components: [row] });
   }
@@ -82,14 +110,17 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'givecredits' && process.env.ADMIN_IDS.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
+
     if (!users[target.id]) users[target.id] = { credits: 0, slots: [] };
+
     users[target.id].credits += amount;
     saveUsers();
+
     await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
   }
 });
 
-// Button & Modal handling
+// ================= BUTTON HANDLER =================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
@@ -98,67 +129,66 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.customId === 'get_credits') {
     await interaction.reply({
-      content: `🛒 Go to <#${process.env.PURCHASE_CHANNEL_ID}> and open a ticket or DM an admin!\nYou currently have **${users[userId].credits} credits**.`,
+      content: `🛒 Go to <#${process.env.PURCHASE_CHANNEL_ID}> to buy credits!\nYou have **${users[userId].credits} credits**.`,
       ephemeral: true
     });
   }
 
   if (interaction.customId === 'activate_slot') {
     if (users[userId].slots.length >= 6) {
-      return interaction.reply({ content: '❌ You already have the maximum 6 slots!', ephemeral: true });
+      return interaction.reply({ content: '❌ Max 6 slots reached!', ephemeral: true });
     }
 
     const modal = new ModalBuilder()
       .setCustomId('activate_modal')
       .setTitle('Activate Slot');
 
-    const creditsInput = new TextInputBuilder()
+    const input = new TextInputBuilder()
       .setCustomId('credits_amount')
-      .setLabel('How many credits to spend?')
+      .setLabel('Credits to spend')
       .setStyle(TextInputStyle.Short)
       .setRequired(true);
 
-    const row = new ActionRowBuilder().addComponents(creditsInput);
-    modal.addComponents(row);
-
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
     await interaction.showModal(modal);
   }
 });
 
-// Modal submit
+// ================= MODAL HANDLER =================
 client.on('interactionCreate', async interaction => {
   if (!interaction.isModalSubmit()) return;
 
   if (interaction.customId === 'activate_modal') {
-    const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
+    const credits = parseInt(interaction.fields.getTextInputValue('credits_amount'));
     const userData = users[interaction.user.id];
 
-    if (creditsToSpend < 1 || creditsToSpend > userData.credits) {
-      return interaction.reply({ content: '❌ Invalid amount or not enough credits!', ephemeral: true });
+    if (!credits || credits > userData.credits) {
+      return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
     }
 
-    const hours = creditsToSpend * 2;
+    const hours = credits * 2;
+
     try {
       const key = await createLuarmorKey(interaction.user.id, hours);
 
       userData.slots.push({ key, expiry: Date.now() + hours * 3600000 });
-      userData.credits -= creditsToSpend;
+      userData.credits -= credits;
       saveUsers();
 
       await interaction.reply({
-        content: `✅ **Slot activated!**\n\n**Key:** \`${key}\`\n**Expires in:** ${hours} hours\n\nPaste this key in your script.`,
+        content: `✅ Key: \`${key}\`\nExpires in ${hours}h`,
         ephemeral: true
       });
-    } catch (err) {
-      await interaction.reply({ content: '❌ Failed to generate key. Check Luarmor API key/IP whitelist.', ephemeral: true });
+    } catch {
+      await interaction.reply({ content: '❌ Key generation failed', ephemeral: true });
     }
   }
 });
 
-// Login + IP check on ready
-client.once('ready', () => {
-  console.log(`✅ Bot online as ${client.user.tag}`);
-  logOutboundIP(); // ← shows the outbound IP in logs
+// ================= READY =================
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  await registerCommands(); // 👈 THIS is the important part
 });
 
 client.login(process.env.BOT_TOKEN);

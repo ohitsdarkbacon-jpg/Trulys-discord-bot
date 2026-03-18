@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
+const https = require('https');
 
 const client = new Client({
   intents: [
@@ -18,6 +19,27 @@ let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) 
 // Save users function
 function saveUsers() {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// Fetch and log current outbound IP
+function logOutboundIP() {
+  https.get('https://api.ipify.org?format=json', (res) => {
+    let data = '';
+    res.on('data', (chunk) => { data += chunk; });
+    res.on('end', () => {
+      try {
+        const ipData = JSON.parse(data);
+        console.log('====================================');
+        console.log('CURRENT OUTBOUND IP:', ipData.ip);
+        console.log('Check this IP in your Luarmor whitelist');
+        console.log('====================================');
+      } catch (e) {
+        console.error('Failed to parse outbound IP:', e.message);
+      }
+    });
+  }).on('error', (e) => {
+    console.error('Outbound IP check failed:', e.message);
+  });
 }
 
 // Luarmor key generator
@@ -38,7 +60,7 @@ async function createLuarmorKey(discordId, hours) {
   return keyData?.key || "ERROR_RETRIEVING_KEY";
 }
 
-// Panel command (run this once in your channel)
+// Panel command (admin only)
 client.on('interactionCreate', async interaction => {
   if (!interaction.isCommand()) return;
 
@@ -76,7 +98,7 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.customId === 'get_credits') {
     await interaction.reply({
-      content: `🛒 Go to <#YOUR_PURCHASE_CHANNEL_ID> and open a ticket or DM an admin!\nYou currently have **${users[userId].credits} credits**.`,
+      content: `🛒 Go to <#${process.env.PURCHASE_CHANNEL_ID}> and open a ticket or DM an admin!\nYou currently have **${users[userId].credits} credits**.`,
       ephemeral: true
     });
   }
@@ -133,14 +155,10 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Login
+// Login + IP check on ready
 client.once('ready', () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
+  logOutboundIP(); // ← shows the outbound IP in logs
 });
-console.log('=== DEBUG: BOT_TOKEN check ===');
-console.log('BOT_TOKEN exists?', !!process.env.BOT_TOKEN);
-console.log('BOT_TOKEN length:', process.env.BOT_TOKEN?.length ?? 'undefined');
-console.log('BOT_TOKEN first 10 chars:', process.env.BOT_TOKEN?.slice(0, 10) ?? 'undefined');
-console.log('BOT_TOKEN last 10 chars:', process.env.BOT_TOKEN?.slice(-10) ?? 'undefined');
-console.log('=== END DEBUG ===');
+
 client.login(process.env.BOT_TOKEN);

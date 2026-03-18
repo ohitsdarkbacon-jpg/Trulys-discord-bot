@@ -27,9 +27,7 @@ const client = new Client({
 });
 
 const USERS_FILE = './users.json';
-let users = fs.existsSync(USERS_FILE)
-  ? JSON.parse(fs.readFileSync(USERS_FILE))
-  : {};
+let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 
 const MAX_SLOTS = 6;
 let globalSlots = []; // stores { userId, key, expiry }
@@ -43,14 +41,17 @@ const commands = [
   new SlashCommandBuilder()
     .setName('panel')
     .setDescription('Open admin panel'),
-
   new SlashCommandBuilder()
     .setName('givecredits')
     .setDescription('Give credits to a user')
     .addUserOption(option =>
-      option.setName('user').setDescription('Target user').setRequired(true))
+      option.setName('user')
+        .setDescription('Target user')
+        .setRequired(true))
     .addIntegerOption(option =>
-      option.setName('amount').setDescription('Credits amount').setRequired(true))
+      option.setName('amount')
+        .setDescription('Credits amount')
+        .setRequired(true))
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -69,21 +70,32 @@ async function registerCommands() {
 }
 
 // ================= LUARMOR KEY =================
-async function createLuarmorKey(discordId, hours) {
+async function createLuarmorKey(hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
 
-  await axios.post(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`, {
-    auth_expire: expiryUnix,
-  }, {
-    headers: { Authorization: process.env.LUARMOR_API_KEY }
-  });
+  try {
+    // POST request to create the key
+    const response = await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      { auth_expire: expiryUnix },
+      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+    );
 
-  const list = await axios.get(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`, {
-    headers: { Authorization: process.env.LUARMOR_API_KEY }
-  });
+    // Return the key directly from POST response if it exists
+    if (response.data?.key) return response.data.key;
 
-  const keyData = list.data.users?.find(u => u.discord_id === discordId);
-  return keyData?.key || "ERROR_RETRIEVING_KEY";
+    // fallback: fetch users and take latest key
+    const list = await axios.get(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+    );
+
+    const keyData = list.data.users?.[list.data.users.length - 1];
+    return keyData?.key || "ERROR_RETRIEVING_KEY";
+  } catch (err) {
+    console.error('Luarmor key generation error:', err.response?.data || err.message);
+    throw new Error('Failed to generate Luarmor key');
+  }
 }
 
 // ================= GLOBAL SLOTS UI =================
@@ -177,8 +189,7 @@ client.on('interactionCreate', async interaction => {
 
 // ================= MODAL HANDLER =================
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  if (interaction.customId !== 'activate_modal') return;
+  if (!interaction.isModalSubmit() || interaction.customId !== 'activate_modal') return;
 
   const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
   const userData = users[interaction.user.id];
@@ -194,7 +205,7 @@ client.on('interactionCreate', async interaction => {
   const hours = creditsToSpend * 2;
 
   try {
-    const key = await createLuarmorKey(interaction.user.id, hours);
+    const key = await createLuarmorKey(hours);
 
     globalSlots.push({
       userId: interaction.user.id,
@@ -209,8 +220,8 @@ client.on('interactionCreate', async interaction => {
       content: `✅ **Slot activated!**\n**Key:** \`${key}\`\n**Expires in:** ${hours} hours`,
       ephemeral: true
     });
-  } catch {
-    await interaction.reply({ content: '❌ Failed to generate key', ephemeral: true });
+  } catch (err) {
+    await interaction.reply({ content: `❌ Failed to generate key: ${err.message}`, ephemeral: true });
   }
 });
 

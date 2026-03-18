@@ -74,24 +74,30 @@ async function createLuarmorKey(hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
 
   try {
-    // POST request to create the key
     const response = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
       { auth_expire: expiryUnix },
       { headers: { Authorization: process.env.LUARMOR_API_KEY } }
     );
 
-    // Return the key directly from POST response if it exists
-    if (response.data?.key) return response.data.key;
+    // Automatically find the key in the response
+    const findKeyRecursively = (obj) => {
+      if (typeof obj === 'string') {
+        if (obj.match(/^[A-Za-z0-9]{6,}$/)) return obj; // likely the key
+      } else if (typeof obj === 'object' && obj !== null) {
+        for (const value of Object.values(obj)) {
+          const result = findKeyRecursively(value);
+          if (result) return result;
+        }
+      }
+      return null;
+    };
 
-    // fallback: fetch users and take latest key
-    const list = await axios.get(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-    );
+    const key = findKeyRecursively(response.data);
+    if (!key) throw new Error('Key not found in response');
 
-    const keyData = list.data.users?.[list.data.users.length - 1];
-    return keyData?.key || "ERROR_RETRIEVING_KEY";
+    return key;
+
   } catch (err) {
     console.error('Luarmor key generation error:', err.response?.data || err.message);
     throw new Error('Failed to generate Luarmor key');

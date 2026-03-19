@@ -1,0 +1,17 @@
+{
+  "active": [],
+  "auctions": [
+    {
+      "id": "auction1",
+      "currentBid": 2,
+      "currentUser": null,
+      "expires": null
+    },
+    {
+      "id": "auction2",
+      "currentBid": 2,
+      "currentUser": null,
+      "expires": null
+    }
+  ]
+}

@@ -60,29 +60,23 @@ async function createLuarmorKey(discordId, msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
 
   try {
-    // Step 1: Create new key
-    const createRes = await axios.post(
+    const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { auth_expire: expiryUnix },
+      {
+        auth_expire: expiryUnix,
+        discord_id: discordId // associate key immediately with the user
+      },
       {
         headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' },
         timeout: 10000
       }
     );
 
-    if (!createRes.data.success) throw new Error('Luarmor key creation failed');
+    if (!res.data.success || !res.data.user || !res.data.user.key) {
+      throw new Error('Failed to generate Luarmor key from API');
+    }
 
-    // Step 2: Fetch newest key
-    const listRes = await axios.get(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { headers: { Authorization: process.env.LUARMOR_API_KEY }, timeout: 10000 }
-    );
-
-    const newestUser = listRes.data.users.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-    const key = newestUser?.key || newestUser?.user_key;
-    if (!key) throw new Error('No key found after creation');
-
-    return key;
+    return res.data.user.key;
   } catch (err) {
     console.error('Luarmor API error:', err.response?.data || err.message);
     throw new Error(`Failed to create key: ${err.message}`);
@@ -155,7 +149,6 @@ client.on('interactionCreate', async interaction => {
 
   // Activate slot with credits modal
   if (interaction.customId === 'activate') {
-    // Clean expired slots first
     slots = slots.filter(s => s.expiry > Date.now());
     saveSlots();
 
@@ -238,7 +231,7 @@ setInterval(async () => {
         const txs = res.data.txrefs || [];
         txs.forEach(tx => {
           if (tx.confirmations < 1 || user.processed.includes(tx.tx_hash)) return;
-          const credits = Math.floor(tx.value / 100000); // 1 credit = 0.000001 BTC/LTC approx
+          const credits = Math.floor(tx.value / 100000);
           user.credits += credits;
           user.processed.push(tx.tx_hash);
           console.log(`Added ${credits} credits to ${id}`);

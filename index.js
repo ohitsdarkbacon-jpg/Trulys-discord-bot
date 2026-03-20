@@ -8,77 +8,24 @@ const {
 const axios = require('axios');
 const fs = require('fs');
 const https = require('https');
-const express = require('express');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.MessageContent,
+  GatewayIntentBits.GuildMembers
+] });
 
-// ===== DATA FILES =====
+// ===== Data Files =====
+const USERS_FILE = './users.json';
 const SLOTS_FILE = './slots.json';
-const CREDITS_FILE = './credits.json';
+let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
-let creditsData = fs.existsSync(CREDITS_FILE) ? JSON.parse(fs.readFileSync(CREDITS_FILE)) : {};
+const MAX_SLOTS = 6;
 
+// ===== Utils =====
+function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2)); }
-function saveCredits() { fs.writeFileSync(CREDITS_FILE, JSON.stringify(creditsData, null, 2)); }
-
-const ADMIN_IDS = process.env.ADMIN_IDS.split(',');
-
-// ===== COMMANDS =====
-const commands = [
-  new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
-  new SlashCommandBuilder()
-    .setName('givecredits')
-    .setDescription('Give credits to a user')
-    .addUserOption(opt => opt.setName('user').setDescription('Target user').setRequired(true))
-    .addIntegerOption(opt => opt.setName('amount').setDescription('Credits amount').setRequired(true))
-].map(c => c.toJSON());
-
-const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-async function registerCommands() {
-  await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
-}
-
-// ===== OUTBOUND IP LOG =====
-function logOutboundIP() {
-  https.get('https://api.ipify.org?format=json', res => {
-    let data = '';
-    res.on('data', chunk => { data += chunk; });
-    res.on('end', () => {
-      try {
-        const ipData = JSON.parse(data);
-        console.log('====================================');
-        console.log('CURRENT OUTBOUND IP:', ipData.ip);
-        console.log('Check this IP in your Luarmor whitelist');
-        console.log('====================================');
-      } catch (e) { console.error('Failed to parse outbound IP:', e.message); }
-    });
-  }).on('error', err => { console.error('Outbound IP check failed:', err.message); });
-}
-
-// ===== LUARMOR KEY (fresh key each time) =====
-async function createFreshLuarmorKey(msUntilExpiry) {
-  const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
-
-  try {
-    const res = await axios.post(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { auth_expire: expiryUnix },
-      { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
-    );
-
-    if (!res.data.success || !res.data.user?.key) {
-      throw new Error('No key returned from Luarmor API');
-    }
-
-    return res.data.user.key;
-
-  } catch (err) {
-    console.error('Luarmor key generation failed:', err.response?.data || err.message);
-    throw new Error('Failed to generate Luarmor key');
-  }
-}
-
-// ===== TIME FORMAT =====
 function formatTime(ms) {
   const totalMinutes = Math.floor(ms / 60000);
   const hours = Math.floor(totalMinutes / 60);
@@ -86,148 +33,167 @@ function formatTime(ms) {
   return `${hours}h ${minutes}m`;
 }
 
-// ===== EXPRESS BACKEND =====
-const app = express();
-app.use(express.json());
-app.get('/', (req, res) => res.send('Running'));
-app.listen(process.env.PORT || 3000);
+// ===== Commands =====
+const commands = [
+  new SlashCommandBuilder().setName('panel').setDescription('Open admin panel'),
+  new SlashCommandBuilder()
+    .setName('givecredits')
+    .setDescription('Give credits to a user')
+    .addUserOption(option => option.setName('user').setDescription('Target user').setRequired(true))
+    .addIntegerOption(option => option.setName('amount').setDescription('Credits amount').setRequired(true))
+].map(c => c.toJSON());
 
-// ===== DISCORD PANEL =====
+const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+async function registerCommands() {
+  await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
+}
+
+// ===== Outbound IP (for Luarmor whitelist) =====
+function logOutboundIP() {
+  https.get('https://api.ipify.org?format=json', res => {
+    let data = '';
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => {
+      try { console.log('CURRENT OUTBOUND IP:', JSON.parse(data).ip); } 
+      catch (e) { console.error('Failed to parse IP:', e.message); }
+    });
+  }).on('error', e => console.error('Outbound IP check failed:', e.message));
+}
+
+// ===== Luarmor Key Generation =====
+async function createLuarmorKey(hours) {
+  const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
+  try {
+    const res = await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      { auth_expire: expiryUnix },
+      { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
+    );
+    const key = res.data.user?.key;
+    if (!key) return { error: true, response: res.data };
+    return { key };
+  } catch (err) { return { error: true, response: err.response?.data || err.message }; }
+}
+
+// ===== Slots Embed =====
+function generateSlotsEmbed() {
+  const embed = new EmbedBuilder().setTitle('🎟️ Global Slots').setColor(0x0099ff);
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    const slot = slots[i];
+    if (slot && slot.expiry > Date.now()) {
+      embed.addFields({ name: `Slot ${i + 1}`, value: `✅ Taken by <@${slot.userId}>\nExpires in: ${formatTime(slot.expiry - Date.now())}` });
+    } else embed.addFields({ name: `Slot ${i + 1}`, value: '🟢 Available' });
+  }
+  return embed;
+}
+
+// ===== Command Handler =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+  const adminIds = process.env.ADMIN_IDS.split(',');
 
-  if (interaction.commandName === 'panel') {
-    const embed = new EmbedBuilder().setTitle('🔑 Slot System').setDescription('1 Credit = 2 Hours per slot');
+  if (interaction.commandName === 'panel' && adminIds.includes(interaction.user.id)) {
+    const embed = new EmbedBuilder().setTitle('🔑 Slot System').setDescription('1 Credit = 2 Hours\nMax 6 slots total').setColor(0x00ff00);
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('buy').setLabel('💳 Buy').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('activate').setLabel('⚡ Activate Slot').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('release').setLabel('❌ Release Slot').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('viewslots').setLabel('📋 View Slots').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('get_credits').setLabel('🛒 Credits').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('activate_slot').setLabel('⚡ Activate Slot').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('view_slots').setLabel('📊 View Slots').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('buy').setLabel('💳 Buy Credits').setStyle(ButtonStyle.Success)
     );
     await interaction.reply({ embeds: [embed], components: [row] });
   }
 
-  if (interaction.commandName === 'givecredits' && ADMIN_IDS.includes(interaction.user.id)) {
+  if (interaction.commandName === 'givecredits' && adminIds.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
-    creditsData[target.id] = (creditsData[target.id] || 0) + amount;
-    saveCredits();
+    if (!users[target.id]) users[target.id] = { credits: 0, processed: [] };
+    users[target.id].credits += amount;
+    saveUsers();
     await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
   }
 });
 
-// ===== BUTTON HANDLER =====
+// ===== Button Handler =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const id = interaction.user.id;
-  creditsData[id] = creditsData[id] || 0;
+  if (!users[id]) users[id] = { credits: 0, processed: [] };
 
-  if (interaction.customId === 'credits') {
-    return interaction.reply({ content: `💰 You have **${creditsData[id]} credits**`, ephemeral: true });
+  if (interaction.customId === 'get_credits') {
+    return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
   }
 
   if (interaction.customId === 'buy') {
     try {
-      const btcRes = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs`, {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
-      const ltcRes = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs`, {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
-      const wallets = { btc: btcRes.data.address, ltc: ltcRes.data.address, processed: [] };
-      fs.writeFileSync(`./wallets_${id}.json`, JSON.stringify(wallets, null, 2));
-      return interaction.reply({
-        content: `💳 Send crypto to get credits:\n🟠 BTC: \`${wallets.btc}\`\n⚪ LTC: \`${wallets.ltc}\`\n1 Credit = 2 Hours`,
-        ephemeral: true
-      });
-    } catch {
-      return interaction.reply({ content: '❌ Failed to generate wallets.', ephemeral: true });
-    }
+      const btcRes = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`, {});
+      const ltcRes = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`, {});
+      users[id].btc = btcRes.data.address;
+      users[id].ltc = ltcRes.data.address;
+      users[id].processed = [];
+      saveUsers();
+      return interaction.reply({ content: `💳 Send crypto to:\nBTC: ${btcRes.data.address}\nLTC: ${ltcRes.data.address}\nCredits will be added automatically.`, ephemeral: true });
+    } catch { return interaction.reply({ content: '❌ Failed to generate wallets', ephemeral: true }); }
   }
 
-  if (interaction.customId === 'activate') {
-    slots = slots.filter(s => s.expiry > Date.now());
-    saveSlots();
-    if (slots.length >= 6) return interaction.reply({ content: '❌ All 6 slots occupied!', ephemeral: true });
-
+  if (interaction.customId === 'activate_slot') {
+    if (slots.filter(s => s.expiry > Date.now()).length >= MAX_SLOTS) return interaction.reply({ content: '❌ All slots taken!', ephemeral: true });
     const modal = new ModalBuilder().setCustomId('activate_modal').setTitle('Activate Slot');
-    const input = new TextInputBuilder().setCustomId('credits_amount').setLabel('Credits to spend (1 = 2h)').setStyle(TextInputStyle.Short).setRequired(true);
+    const input = new TextInputBuilder().setCustomId('credits_amount').setLabel('Credits to spend (1 credit = 2 hours)').setStyle(TextInputStyle.Short).setRequired(true);
     modal.addComponents(new ActionRowBuilder().addComponents(input));
     return interaction.showModal(modal);
   }
 
-  if (interaction.customId === 'release') {
-    const userSlots = slots.filter(s => s.ownerId === id);
-    if (!userSlots.length) return interaction.reply({ content: '❌ You do not own any slots', ephemeral: true });
-    slots = slots.filter(s => s.ownerId !== id);
-    saveSlots();
-    return interaction.reply({ content: '❌ Slot released', ephemeral: true });
-  }
-
-  if (interaction.customId === 'viewslots') {
-    const activeSlots = slots.filter(s => s.expiry > Date.now());
-    if (!activeSlots.length) return interaction.reply({ content: 'No active slots.', ephemeral: true });
-    let msg = '🔑 Active Slots:\n\n';
-    activeSlots.forEach((s, i) => {
-      const remaining = formatTime(s.expiry - Date.now());
-      msg += `${i + 1}. Owner: <@${s.ownerId}>\n   Expires in: ${remaining}\n`;
-    });
-    return interaction.reply({ content: msg, ephemeral: true });
-  }
+  if (interaction.customId === 'view_slots') return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
 });
 
-// ===== MODAL HANDLER =====
+// ===== Modal Handler =====
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  if (interaction.customId !== 'activate_modal') return;
-
+  if (!interaction.isModalSubmit() || interaction.customId !== 'activate_modal') return;
   const id = interaction.user.id;
-  const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
-  const availableCredits = creditsData[id] || 0;
-  if (!creditsToSpend || creditsToSpend > availableCredits) return interaction.reply({ content: '❌ Not enough credits', ephemeral: true });
+  const credits = parseInt(interaction.fields.getTextInputValue('credits_amount'));
+  if (!credits || credits > users[id].credits) return interaction.reply({ content: '❌ Invalid/insufficient credits', ephemeral: true });
 
-  const ms = creditsToSpend * 2 * 60 * 60 * 1000; // 1 credit = 2 hours
-  try {
-    const key = await createFreshLuarmorKey(ms);
-    slots.push({ key, ownerId: id, expiry: Date.now() + ms });
-    creditsData[id] -= creditsToSpend;
-    saveSlots();
-    saveCredits();
-    return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
-  } catch {
-    return interaction.reply({ content: '❌ Failed to generate Luarmor key', ephemeral: true });
-  }
+  const hours = credits * 2;
+  const result = await createLuarmorKey(hours);
+  if (result.error) return interaction.reply({ content: `❌ Key generation failed:\n\`\`\`json\n${JSON.stringify(result.response,null,2)}\n\`\`\``, ephemeral: true });
+
+  slots.push({ userId: id, key: result.key, expiry: Date.now() + hours * 3600000 });
+  users[id].credits -= credits;
+  saveUsers();
+  saveSlots();
+
+  return interaction.reply({ content: `✅ Slot activated!\nKey: \`${result.key}\`\nExpires in: ${formatTime(hours * 3600000)}`, ephemeral: true });
 });
 
-// ===== AUTO SLOT CLEANUP =====
+// ===== Auto Cleanup =====
 setInterval(() => {
   slots = slots.filter(s => s.expiry > Date.now());
   saveSlots();
-}, 60 * 1000);
+}, 60000);
 
-// ===== AUTO PAYMENT CHECK =====
+// ===== Auto Credit Checker (BTC/LTC) =====
 setInterval(async () => {
-  const walletFiles = fs.readdirSync('./').filter(f => f.startsWith('wallets_'));
-  for (const file of walletFiles) {
-    const id = file.split('_')[1].split('.')[0];
-    const wallets = JSON.parse(fs.readFileSync(file));
-    for (const type of ['btc', 'ltc']) {
-      if (!wallets[type]) continue;
+  for (const id in users) {
+    const user = users[id];
+    for (const coin of ['btc','ltc']) {
+      if (!user[coin]) continue;
       try {
-        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${wallets[type]}`);
+        const res = await axios.get(`https://api.blockcypher.com/v1/${coin}/main/addrs/${user[coin]}`);
         const txs = res.data.txrefs || [];
         for (const tx of txs) {
-          if (tx.confirmations < 1 || wallets.processed.includes(tx.tx_hash)) continue;
-          const credits = Math.floor(tx.value / 100000);
-          creditsData[id] = (creditsData[id] || 0) + credits;
-          wallets.processed.push(tx.tx_hash);
-          console.log(`Added ${credits} credits to ${id}`);
+          if (tx.confirmations < 1 || user.processed.includes(tx.tx_hash)) continue;
+          const creditsToAdd = Math.floor(tx.value / 100000); // convert satoshis to credits
+          user.credits += creditsToAdd;
+          user.processed.push(tx.tx_hash);
+          console.log(`Added ${creditsToAdd} credits to ${id} (${coin})`);
         }
-        fs.writeFileSync(file, JSON.stringify(wallets, null, 2));
-        saveCredits();
       } catch {}
     }
   }
+  saveUsers();
 }, 20000);
 
-// ===== READY =====
+// ===== Ready =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();

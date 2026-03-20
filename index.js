@@ -60,50 +60,27 @@ async function createLuarmorKey(discordId, msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
 
   try {
-    // Step 1: Create new user/key (omit discord_id to force fresh key)
+    // Step 1: Create new key
     const createRes = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { auth_expire: expiryUnix }, // ← no discord_id here = new unclaimed key
+      { auth_expire: expiryUnix },
       {
-        headers: {
-          Authorization: process.env.LUARMOR_API_KEY,
-          'Content-Type': 'application/json'
-        },
+        headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' },
         timeout: 10000
       }
     );
 
-    // Log full response for debug
-    console.log('Luarmor POST response:', JSON.stringify(createRes.data, null, 2));
+    if (!createRes.data.success) throw new Error('Luarmor key creation failed');
 
-    if (!createRes.data.success) {
-      throw new Error(`Luarmor POST failed: ${createRes.data.message || 'Unknown error'}`);
-    }
-
-    // Step 2: Immediately GET users and find the newest one (most reliable)
+    // Step 2: Fetch newest key
     const listRes = await axios.get(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      {
-        headers: { Authorization: process.env.LUARMOR_API_KEY },
-        timeout: 10000
-      }
+      { headers: { Authorization: process.env.LUARMOR_API_KEY }, timeout: 10000 }
     );
 
-    // Sort by creation time (newest first) or assume last in list
-    const usersList = listRes.data.users || [];
-    const newestUser = usersList.sort((a, b) => {
-      const ta = new Date(a.created_at || 0).getTime();
-      const tb = new Date(b.created_at || 0).getTime();
-      return tb - ta; // newest first
-    })[0];
-
+    const newestUser = listRes.data.users.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
     const key = newestUser?.key || newestUser?.user_key;
-    if (!key) {
-      throw new Error('No key found in GET response after create');
-    }
-
-    // Optional: associate with discord_id after creation (PATCH)
-    // await axios.patch(..., { user_key: key, discord_id: discordId }, ...);
+    if (!key) throw new Error('No key found after creation');
 
     return key;
   } catch (err) {
@@ -111,6 +88,7 @@ async function createLuarmorKey(discordId, msUntilExpiry) {
     throw new Error(`Failed to create key: ${err.message}`);
   }
 }
+
 // ===== TIME FORMAT =====
 function formatTime(ms) {
   const totalMinutes = Math.floor(ms / 60000);
@@ -130,7 +108,7 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'panel') {
-    const embed = new EmbedBuilder().setTitle('🔑 Slot System').setDescription('1 Credit = 2 Hours');
+    const embed = new EmbedBuilder().setTitle('🔑 Slot System').setDescription('1 Credit = 2 Hours per slot');
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('buy').setLabel('💳 Buy').setStyle(ButtonStyle.Success),
@@ -157,7 +135,8 @@ client.on('interactionCreate', async interaction => {
   const id = interaction.user.id;
   if (!users[id]) users[id] = { credits: 0, processed: [] };
 
-  if (interaction.customId === 'credits') return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
+  if (interaction.customId === 'credits')
+    return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
 
   if (interaction.customId === 'buy') {
     try {
@@ -176,7 +155,11 @@ client.on('interactionCreate', async interaction => {
 
   // Activate slot with credits modal
   if (interaction.customId === 'activate') {
-    if (slots.filter(s => s.expiry > Date.now()).length >= 6)
+    // Clean expired slots first
+    slots = slots.filter(s => s.expiry > Date.now());
+    saveSlots();
+
+    if (slots.length >= 6)
       return interaction.reply({ content: '❌ All 6 slots are currently occupied!', ephemeral: true });
 
     const modal = new ModalBuilder().setCustomId('activate_modal').setTitle('Activate Slot');
@@ -223,14 +206,19 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
 
   const ms = creditsToSpend * 2 * 60 * 60 * 1000; // each credit = 2 hours
-  const key = await createLuarmorKey(id, ms);
 
-  users[id].credits -= creditsToSpend;
-  slots.push({ key, ownerId: id, expiry: Date.now() + ms });
-  saveUsers();
-  saveSlots();
+  try {
+    const key = await createLuarmorKey(id, ms);
 
-  return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
+    users[id].credits -= creditsToSpend;
+    slots.push({ key, ownerId: id, expiry: Date.now() + ms });
+    saveUsers();
+    saveSlots();
+
+    return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
+  } catch (err) {
+    return interaction.reply({ content: '❌ Failed to generate Luarmor key', ephemeral: true });
+  }
 });
 
 // ===== AUTO SLOT CLEANUP =====
@@ -250,7 +238,7 @@ setInterval(async () => {
         const txs = res.data.txrefs || [];
         txs.forEach(tx => {
           if (tx.confirmations < 1 || user.processed.includes(tx.tx_hash)) return;
-          const credits = Math.floor(tx.value / 100000);
+          const credits = Math.floor(tx.value / 100000); // 1 credit = 0.000001 BTC/LTC approx
           user.credits += credits;
           user.processed.push(tx.tx_hash);
           console.log(`Added ${credits} credits to ${id}`);

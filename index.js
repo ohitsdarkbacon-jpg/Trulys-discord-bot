@@ -4,16 +4,19 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   REST, Routes, SlashCommandBuilder
 } = require('discord.js');
-
 const axios = require('axios');
 const fs = require('fs');
+const https = require('https');
 const express = require('express');
 
-// ===== SETUP =====
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// ===== EXPRESS BACKEND =====
 const app = express();
 app.use(express.json());
 
+// ===== CLIENT SETUP =====
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// ===== DATA FILE =====
 const USERS_FILE = './users.json';
 let users = fs.existsSync(USERS_FILE)
   ? JSON.parse(fs.readFileSync(USERS_FILE))
@@ -23,15 +26,22 @@ function saveUsers() {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
+// ===== ADMIN IDS =====
 const ADMIN_IDS = process.env.ADMIN_IDS.split(',');
 
 // ===== COMMANDS =====
 const commands = [
   new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
+  new SlashCommandBuilder()
+    .setName('givecredits')
+    .setDescription('Give credits to a user')
+    .addUserOption(option =>
+      option.setName('user').setDescription('Target user').setRequired(true))
+    .addIntegerOption(option =>
+      option.setName('amount').setDescription('Credits amount').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-
 async function registerCommands() {
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
@@ -39,7 +49,28 @@ async function registerCommands() {
   );
 }
 
-// ===== LUARMOR =====
+// ===== OUTBOUND IP LOG =====
+function logOutboundIP() {
+  https.get('https://api.ipify.org?format=json', (res) => {
+    let data = '';
+    res.on('data', chunk => { data += chunk; });
+    res.on('end', () => {
+      try {
+        const ipData = JSON.parse(data);
+        console.log('====================================');
+        console.log('CURRENT OUTBOUND IP:', ipData.ip);
+        console.log('Check this IP in your Luarmor whitelist');
+        console.log('====================================');
+      } catch (e) {
+        console.error('Failed to parse outbound IP:', e.message);
+      }
+    });
+  }).on('error', (err) => {
+    console.error('Outbound IP check failed:', err.message);
+  });
+}
+
+// ===== LUARMOR KEY =====
 async function createLuarmorKey(discordId, hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
 
@@ -58,16 +89,15 @@ async function createLuarmorKey(discordId, hours) {
   return user?.key || "ERROR_KEY";
 }
 
-// ===== FORMAT TIME =====
+// ===== TIME FORMAT =====
 function formatTime(ms) {
   const minutes = Math.floor(ms / 60000);
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-
   return `${hours}h ${remainingMinutes}m`;
 }
 
-// ===== PANEL =====
+// ===== DISCORD PANEL =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -85,81 +115,78 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.reply({ embeds: [embed], components: [row] });
   }
+
+  if (interaction.commandName === 'givecredits' && ADMIN_IDS.includes(interaction.user.id)) {
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+
+    if (!users[target.id]) users[target.id] = { credits: 0, slots: [], processed: [] };
+    users[target.id].credits += amount;
+    saveUsers();
+
+    await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
+  }
 });
 
-// ===== BUTTONS =====
+// ===== BUTTON HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
   const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, slots: [] };
+  if (!users[id]) users[id] = { credits: 0, slots: [], processed: [] };
 
+  // Check credits
   if (interaction.customId === 'credits') {
-    return interaction.reply({
-      content: `💰 Credits: ${users[id].credits}`,
-      ephemeral: true
-    });
+    return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
   }
 
+  // Buy credits (BTC + LTC)
   if (interaction.customId === 'buy') {
-    // Generate BTC + LTC address
-    const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs`, {}, {
-      params: { token: process.env.BLOCKCYPHER_TOKEN }
-    });
+    try {
+      const btc = await axios.post(
+        'https://api.blockcypher.com/v1/btc/main/addrs',
+        {},
+        { params: { token: process.env.BLOCKCYPHER_TOKEN } }
+      );
+      const ltc = await axios.post(
+        'https://api.blockcypher.com/v1/ltc/main/addrs',
+        {},
+        { params: { token: process.env.BLOCKCYPHER_TOKEN } }
+      );
 
-    const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs`, {}, {
-      params: { token: process.env.BLOCKCYPHER_TOKEN }
-    });
+      users[id].btc = btc.data.address;
+      users[id].ltc = ltc.data.address;
+      users[id].processed = [];
+      saveUsers();
 
-    users[id].btc = btc.data.address;
-    users[id].ltc = ltc.data.address;
-    users[id].processed = [];
-
-    saveUsers();
-
-    return interaction.reply({
-      content:
-`💳 Send crypto:
-
-🟠 BTC:
-\`${btc.data.address}\`
-
-⚪ LTC:
-\`${ltc.data.address}\`
-
-Credits are added automatically.`,
-      ephemeral: true
-    });
+      return interaction.reply({
+        content: `💳 Send crypto:\n\n🟠 BTC: \`${btc.data.address}\`\n⚪ LTC: \`${ltc.data.address}\`\nCredits will be added automatically.`,
+        ephemeral: true
+      });
+    } catch (err) {
+      console.log(err.response?.data || err.message);
+      return interaction.reply({ content: '❌ Failed to generate wallet. Check API token.', ephemeral: true });
+    }
   }
 
+  // Activate slot
   if (interaction.customId === 'activate') {
-    if (users[id].credits < 1)
-      return interaction.reply({ content: '❌ Not enough credits', ephemeral: true });
-
+    if (users[id].credits < 1) return interaction.reply({ content: '❌ Not enough credits', ephemeral: true });
     const hours = 2;
     const key = await createLuarmorKey(id, hours);
 
     users[id].credits -= 1;
-    users[id].slots.push({
-      key,
-      expiry: Date.now() + hours * 3600000
-    });
-
+    users[id].slots.push({ key, expiry: Date.now() + hours * 3600000 });
     saveUsers();
 
-    return interaction.reply({
-      content: `✅ Key: \`${key}\`\nExpires in ${formatTime(hours * 3600000)}`,
-      ephemeral: true
-    });
+    return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(hours * 3600000)}`, ephemeral: true });
   }
 
+  // Release slot
   if (interaction.customId === 'release') {
-    if (users[id].slots.length === 0)
-      return interaction.reply({ content: 'No slots', ephemeral: true });
-
+    if (users[id].slots.length === 0) return interaction.reply({ content: 'No slots', ephemeral: true });
     users[id].slots.pop();
     saveUsers();
-
     return interaction.reply({ content: '❌ Slot released', ephemeral: true });
   }
 });
@@ -168,46 +195,35 @@ Credits are added automatically.`,
 setInterval(async () => {
   for (const id in users) {
     const user = users[id];
-
     for (const type of ['btc', 'ltc']) {
       if (!user[type]) continue;
-
       try {
-        const res = await axios.get(
-          `https://api.blockcypher.com/v1/${type}/main/addrs/${user[type]}`
-        );
-
+        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${user[type]}`);
         const txs = res.data.txrefs || [];
-
         txs.forEach(tx => {
           if (tx.confirmations < 1) return;
-
           if (user.processed.includes(tx.tx_hash)) return;
-
-          const credits = Math.floor(tx.value / 100000); // adjust rate
+          const credits = Math.floor(tx.value / 100000); // 1 credit per 100k satoshis
           user.credits += credits;
           user.processed.push(tx.tx_hash);
-
           console.log(`Added ${credits} credits to ${id}`);
         });
-
       } catch {}
     }
   }
-
   saveUsers();
 }, 20000);
 
-// ===== BACKEND =====
+// ===== EXPRESS ENDPOINTS =====
 app.get('/', (req, res) => res.send('Running'));
 app.get('/users.json', (req, res) => res.json(users));
-
 app.listen(process.env.PORT || 3000);
 
 // ===== READY =====
 client.once('ready', async () => {
-  console.log(`✅ ${client.user.tag}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
+  logOutboundIP(); // 👈 Show outbound IP for Luarmor whitelist
 });
 
 client.login(process.env.BOT_TOKEN);

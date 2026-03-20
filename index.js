@@ -55,22 +55,25 @@ function logOutboundIP() {
   }).on('error', err => { console.error('Outbound IP check failed:', err.message); });
 }
 
-// ===== LUARMOR KEY =====
-async function createLuarmorKey(msUntilExpiry) {
+// ===== LUARMOR KEY (fresh key each time) =====
+async function createFreshLuarmorKey(msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
+
   try {
-    // Create a brand new key without Discord ID
     const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
       { auth_expire: expiryUnix },
       { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
     );
+
     if (!res.data.success || !res.data.user?.key) {
       throw new Error('No key returned from Luarmor API');
     }
+
     return res.data.user.key;
+
   } catch (err) {
-    console.error('Luarmor API error:', err.response?.data || err.message);
+    console.error('Luarmor key generation failed:', err.response?.data || err.message);
     throw new Error('Failed to generate Luarmor key');
   }
 }
@@ -108,8 +111,7 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'givecredits' && ADMIN_IDS.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
-    if (!creditsData[target.id]) creditsData[target.id] = 0;
-    creditsData[target.id] += amount;
+    creditsData[target.id] = (creditsData[target.id] || 0) + amount;
     saveCredits();
     await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
   }
@@ -119,7 +121,7 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const id = interaction.user.id;
-  if (!creditsData[id]) creditsData[id] = 0;
+  creditsData[id] = creditsData[id] || 0;
 
   if (interaction.customId === 'credits') {
     return interaction.reply({ content: `💰 You have **${creditsData[id]} credits**`, ephemeral: true });
@@ -181,9 +183,9 @@ client.on('interactionCreate', async interaction => {
   const availableCredits = creditsData[id] || 0;
   if (!creditsToSpend || creditsToSpend > availableCredits) return interaction.reply({ content: '❌ Not enough credits', ephemeral: true });
 
-  const ms = creditsToSpend * 2 * 60 * 60 * 1000;
+  const ms = creditsToSpend * 2 * 60 * 60 * 1000; // 1 credit = 2 hours
   try {
-    const key = await createLuarmorKey(ms);
+    const key = await createFreshLuarmorKey(ms);
     slots.push({ key, ownerId: id, expiry: Date.now() + ms });
     creditsData[id] -= creditsToSpend;
     saveSlots();

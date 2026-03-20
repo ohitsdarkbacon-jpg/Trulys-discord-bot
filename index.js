@@ -2,6 +2,7 @@ require('dotenv').config();
 const {
   Client, GatewayIntentBits, EmbedBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
   REST, Routes, SlashCommandBuilder
 } = require('discord.js');
 const axios = require('axios');
@@ -103,7 +104,7 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'givecredits' && ADMIN_IDS.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
-    if (!users[target.id]) users[target.id] = { credits: 0, slots: [], processed: [] };
+    if (!users[target.id]) users[target.id] = { credits: 0, processed: [] };
     users[target.id].credits += amount;
     saveUsers();
     await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
@@ -114,12 +115,10 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, slots: [], processed: [] };
+  if (!users[id]) users[id] = { credits: 0, processed: [] };
 
-  // Check credits
   if (interaction.customId === 'credits') return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
 
-  // Buy credits (BTC + LTC)
   if (interaction.customId === 'buy') {
     try {
       const btc = await axios.post('https://api.blockcypher.com/v1/btc/main/addrs', {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
@@ -135,20 +134,19 @@ client.on('interactionCreate', async interaction => {
     } catch (err) { return interaction.reply({ content: '❌ Failed to generate wallet. Check API token.', ephemeral: true }); }
   }
 
-  // Activate slot
+  // Activate slot with credits modal
   if (interaction.customId === 'activate') {
-    const ACTIVE_SLOTS = slots.filter(s => s.expiry > Date.now());
-    if (ACTIVE_SLOTS.length >= 6) return interaction.reply({ content: '❌ All 6 slots are currently occupied!', ephemeral: true });
-    if (users[id].credits < 1) return interaction.reply({ content: '❌ Not enough credits', ephemeral: true });
+    if (slots.filter(s => s.expiry > Date.now()).length >= 6)
+      return interaction.reply({ content: '❌ All 6 slots are currently occupied!', ephemeral: true });
 
-    const ms = 2 * 60 * 60 * 1000; // 2 hours
-    const key = await createLuarmorKey(id, ms);
-
-    users[id].credits -= 1;
-    slots.push({ key, ownerId: id, expiry: Date.now() + ms });
-    saveUsers();
-    saveSlots();
-    return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
+    const modal = new ModalBuilder().setCustomId('activate_modal').setTitle('Activate Slot');
+    const input = new TextInputBuilder()
+      .setCustomId('credits_amount')
+      .setLabel('Credits to spend (1 credit = 2 hours)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    return interaction.showModal(modal);
   }
 
   // Release slot
@@ -174,12 +172,32 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ===== AUTO SLOT EXPIRY CLEANUP =====
-setInterval(() => {
-  const now = Date.now();
-  slots = slots.filter(s => s.expiry > now);
+// ===== MODAL HANDLER =====
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  if (interaction.customId !== 'activate_modal') return;
+
+  const id = interaction.user.id;
+  const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
+  if (!creditsToSpend || creditsToSpend > users[id].credits)
+    return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
+
+  const ms = creditsToSpend * 2 * 60 * 60 * 1000; // each credit = 2 hours
+  const key = await createLuarmorKey(id, ms);
+
+  users[id].credits -= creditsToSpend;
+  slots.push({ key, ownerId: id, expiry: Date.now() + ms });
+  saveUsers();
   saveSlots();
-}, 60 * 1000); // every minute
+
+  return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
+});
+
+// ===== AUTO SLOT CLEANUP =====
+setInterval(() => {
+  slots = slots.filter(s => s.expiry > Date.now());
+  saveSlots();
+}, 60 * 1000);
 
 // ===== AUTO PAYMENT CHECK =====
 setInterval(async () => {

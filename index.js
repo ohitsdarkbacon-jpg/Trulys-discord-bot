@@ -13,12 +13,9 @@ const express = require('express');
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ===== DATA FILES =====
-const USERS_FILE = './users.json';
 const SLOTS_FILE = './slots.json';
-let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
 
-function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2)); }
 
 const ADMIN_IDS = process.env.ADMIN_IDS.split(',');
@@ -56,23 +53,17 @@ function logOutboundIP() {
 }
 
 // ===== LUARMOR KEY =====
-async function createLuarmorKey(discordId, msUntilExpiry) {
+async function createLuarmorKey(msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
 
   try {
     const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      {
-        auth_expire: expiryUnix,
-        discord_id: discordId // associate key immediately with the user
-      },
-      {
-        headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' },
-        timeout: 10000
-      }
+      { auth_expire: expiryUnix }, // fresh key every time
+      { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
     );
 
-    if (!res.data.success || !res.data.user || !res.data.user.key) {
+    if (!res.data.success || !res.data.user?.key) {
       throw new Error('Failed to generate Luarmor key from API');
     }
 
@@ -114,12 +105,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'givecredits' && ADMIN_IDS.includes(interaction.user.id)) {
-    const target = interaction.options.getUser('user');
-    const amount = interaction.options.getInteger('amount');
-    if (!users[target.id]) users[target.id] = { credits: 0, processed: [] };
-    users[target.id].credits += amount;
-    saveUsers();
-    await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
+    await interaction.reply({ content: '⚠️ Manual credits are disabled in this version.', ephemeral: true });
   }
 });
 
@@ -127,27 +113,35 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, processed: [] };
 
-  if (interaction.customId === 'credits')
-    return interaction.reply({ content: `💰 Credits: ${users[id].credits}`, ephemeral: true });
-
-  if (interaction.customId === 'buy') {
-    try {
-      const btc = await axios.post('https://api.blockcypher.com/v1/btc/main/addrs', {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
-      const ltc = await axios.post('https://api.blockcypher.com/v1/ltc/main/addrs', {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
-      users[id].btc = btc.data.address;
-      users[id].ltc = ltc.data.address;
-      users[id].processed = [];
-      saveUsers();
-      return interaction.reply({
-        content: `💳 Send crypto:\n\n🟠 BTC: \`${btc.data.address}\`\n⚪ LTC: \`${ltc.data.address}\`\nCredits will be added automatically.`,
-        ephemeral: true
-      });
-    } catch (err) { return interaction.reply({ content: '❌ Failed to generate wallet. Check API token.', ephemeral: true }); }
+  // View credits placeholder
+  if (interaction.customId === 'credits') {
+    return interaction.reply({ content: '💰 Credits are now handled automatically via crypto deposits.', ephemeral: true });
   }
 
-  // Activate slot with credits modal
+  // Buy credits (BTC / LTC)
+  if (interaction.customId === 'buy') {
+    try {
+      const btcRes = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs`, {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
+      const ltcRes = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs`, {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
+
+      const wallets = {
+        btc: btcRes.data.address,
+        ltc: ltcRes.data.address,
+        processed: []
+      };
+      fs.writeFileSync(`./wallets_${id}.json`, JSON.stringify(wallets, null, 2));
+
+      return interaction.reply({
+        content: `💳 Send crypto to these addresses to get credits automatically:\n\n🟠 BTC: \`${wallets.btc}\`\n⚪ LTC: \`${wallets.ltc}\`\n\n1 Credit = 2 Hours`,
+        ephemeral: true
+      });
+    } catch (err) {
+      return interaction.reply({ content: '❌ Failed to generate wallets. Check API token.', ephemeral: true });
+    }
+  }
+
+  // Activate slot
   if (interaction.customId === 'activate') {
     slots = slots.filter(s => s.expiry > Date.now());
     saveSlots();
@@ -195,19 +189,13 @@ client.on('interactionCreate', async interaction => {
 
   const id = interaction.user.id;
   const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
-  if (!creditsToSpend || creditsToSpend > users[id].credits)
-    return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
+  if (!creditsToSpend) return interaction.reply({ content: '❌ Invalid credits', ephemeral: true });
 
-  const ms = creditsToSpend * 2 * 60 * 60 * 1000; // each credit = 2 hours
-
+  const ms = creditsToSpend * 2 * 60 * 60 * 1000; // 1 credit = 2 hours
   try {
-    const key = await createLuarmorKey(id, ms);
-
-    users[id].credits -= creditsToSpend;
+    const key = await createLuarmorKey(ms);
     slots.push({ key, ownerId: id, expiry: Date.now() + ms });
-    saveUsers();
     saveSlots();
-
     return interaction.reply({ content: `✅ Key: \`${key}\`\nExpires in ${formatTime(ms)}`, ephemeral: true });
   } catch (err) {
     return interaction.reply({ content: '❌ Failed to generate Luarmor key', ephemeral: true });
@@ -222,24 +210,26 @@ setInterval(() => {
 
 // ===== AUTO PAYMENT CHECK =====
 setInterval(async () => {
-  for (const id in users) {
-    const user = users[id];
+  const walletFiles = fs.readdirSync('./').filter(f => f.startsWith('wallets_'));
+  for (const file of walletFiles) {
+    const id = file.split('_')[1].split('.')[0];
+    const wallets = JSON.parse(fs.readFileSync(file));
     for (const type of ['btc', 'ltc']) {
-      if (!user[type]) continue;
+      if (!wallets[type]) continue;
       try {
-        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${user[type]}`);
+        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${wallets[type]}`);
         const txs = res.data.txrefs || [];
-        txs.forEach(tx => {
-          if (tx.confirmations < 1 || user.processed.includes(tx.tx_hash)) return;
-          const credits = Math.floor(tx.value / 100000);
-          user.credits += credits;
-          user.processed.push(tx.tx_hash);
+        for (const tx of txs) {
+          if (tx.confirmations < 1 || wallets.processed.includes(tx.tx_hash)) continue;
+          const credits = Math.floor(tx.value / 100000); // adjust conversion rate
+          slots.push({ ownerId: id, credits, expiry: Date.now() }); // store credits temporarily
+          wallets.processed.push(tx.tx_hash);
           console.log(`Added ${credits} credits to ${id}`);
-        });
+        }
+        fs.writeFileSync(file, JSON.stringify(wallets, null, 2));
       } catch {}
     }
   }
-  saveUsers();
 }, 20000);
 
 // ===== READY =====

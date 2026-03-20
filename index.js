@@ -59,16 +59,19 @@ function logOutboundIP() {
 async function createLuarmorKey(msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
   try {
+    // Create a brand new key without Discord ID
     const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
       { auth_expire: expiryUnix },
       { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
     );
-    if (!res.data.success || !res.data.user?.key) throw new Error('Failed to generate Luarmor key');
+    if (!res.data.success || !res.data.user?.key) {
+      throw new Error('No key returned from Luarmor API');
+    }
     return res.data.user.key;
   } catch (err) {
     console.error('Luarmor API error:', err.response?.data || err.message);
-    throw new Error(`Failed to create key: ${err.message}`);
+    throw new Error('Failed to generate Luarmor key');
   }
 }
 
@@ -118,12 +121,10 @@ client.on('interactionCreate', async interaction => {
   const id = interaction.user.id;
   if (!creditsData[id]) creditsData[id] = 0;
 
-  // Show credits
   if (interaction.customId === 'credits') {
     return interaction.reply({ content: `💰 You have **${creditsData[id]} credits**`, ephemeral: true });
   }
 
-  // Buy credits via BTC/LTC
   if (interaction.customId === 'buy') {
     try {
       const btcRes = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs`, {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
@@ -139,7 +140,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // Activate slot
   if (interaction.customId === 'activate') {
     slots = slots.filter(s => s.expiry > Date.now());
     saveSlots();
@@ -151,7 +151,6 @@ client.on('interactionCreate', async interaction => {
     return interaction.showModal(modal);
   }
 
-  // Release slot
   if (interaction.customId === 'release') {
     const userSlots = slots.filter(s => s.ownerId === id);
     if (!userSlots.length) return interaction.reply({ content: '❌ You do not own any slots', ephemeral: true });
@@ -160,7 +159,6 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: '❌ Slot released', ephemeral: true });
   }
 
-  // View slots
   if (interaction.customId === 'viewslots') {
     const activeSlots = slots.filter(s => s.expiry > Date.now());
     if (!activeSlots.length) return interaction.reply({ content: 'No active slots.', ephemeral: true });

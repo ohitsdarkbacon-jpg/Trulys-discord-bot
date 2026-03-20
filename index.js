@@ -58,25 +58,58 @@ function logOutboundIP() {
 // ===== LUARMOR KEY =====
 async function createLuarmorKey(discordId, msUntilExpiry) {
   const expiryUnix = Math.floor(Date.now() / 1000) + Math.floor(msUntilExpiry / 1000);
-  await axios.post(
-    `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-    { auth_expire: expiryUnix, discord_id: discordId },
-    { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-  );
-  const list = await axios.get(
-    `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-    { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-  );
-  const user = list.data.users.find(u => u.discord_id === discordId);
-  return user?.key || 'ERROR_KEY';
-}
 
-// ===== TIME FORMAT =====
-function formatTime(ms) {
-  const totalMinutes = Math.floor(ms / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours}h ${minutes}m`;
+  try {
+    // Step 1: Create new user/key (omit discord_id to force fresh key)
+    const createRes = await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      { auth_expire: expiryUnix }, // ← no discord_id here = new unclaimed key
+      {
+        headers: {
+          Authorization: process.env.LUARMOR_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      }
+    );
+
+    // Log full response for debug
+    console.log('Luarmor POST response:', JSON.stringify(createRes.data, null, 2));
+
+    if (!createRes.data.success) {
+      throw new Error(`Luarmor POST failed: ${createRes.data.message || 'Unknown error'}`);
+    }
+
+    // Step 2: Immediately GET users and find the newest one (most reliable)
+    const listRes = await axios.get(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      {
+        headers: { Authorization: process.env.LUARMOR_API_KEY },
+        timeout: 10000
+      }
+    );
+
+    // Sort by creation time (newest first) or assume last in list
+    const usersList = listRes.data.users || [];
+    const newestUser = usersList.sort((a, b) => {
+      const ta = new Date(a.created_at || 0).getTime();
+      const tb = new Date(b.created_at || 0).getTime();
+      return tb - ta; // newest first
+    })[0];
+
+    const key = newestUser?.key || newestUser?.user_key;
+    if (!key) {
+      throw new Error('No key found in GET response after create');
+    }
+
+    // Optional: associate with discord_id after creation (PATCH)
+    // await axios.patch(..., { user_key: key, discord_id: discordId }, ...);
+
+    return key;
+  } catch (err) {
+    console.error('Luarmor API error:', err.response?.data || err.message);
+    throw new Error(`Failed to create key: ${err.message}`);
+  }
 }
 
 // ===== EXPRESS BACKEND =====

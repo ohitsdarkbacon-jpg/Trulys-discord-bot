@@ -62,7 +62,7 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
-// ===== LUARMOR KEY GENERATOR (TIMED KEYS) =====
+// ===== LUARMOR KEY GENERATOR =====
 async function createLuarmorKey(hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
@@ -75,7 +75,7 @@ async function createLuarmorKey(hours) {
 
     console.log('✅ Luarmor response:', JSON.stringify(res.data, null, 2));
 
-    // recursive search for key string
+    // recursive search for key
     const findKey = obj => {
       if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
       if (typeof obj === 'object' && obj) {
@@ -90,7 +90,7 @@ async function createLuarmorKey(hours) {
     const key = findKey(res.data);
     if (!key) throw new Error(`No key found in response: ${JSON.stringify(res.data)}`);
 
-    return key;
+    return { key, expiry: expiryUnix * 1000 }; // return expiry in ms for Discord slots
 
   } catch (err) {
     const errorData = err.response?.data || err.message;
@@ -233,17 +233,23 @@ client.on('interactionCreate', async interaction => {
   const hours = creditsToSpend * 2;
 
   try {
-    const key = await createLuarmorKey(hours);
+    // ✅ Always generate a fresh key
+    const { key, expiry } = await createLuarmorKey(hours);
 
     const slotIndex = slots.findIndex(s => !s || s.expiry <= Date.now());
-    slots[slotIndex] = { userId: interaction.user.id, key, expiry: Date.now() + hours * 3600000 };
+    slots[slotIndex] = {
+      userId: interaction.user.id,
+      key,       // NEW key
+      expiry     // matches key expiry
+    };
 
     userData.credits -= creditsToSpend;
+
     saveUsers();
     saveSlots();
 
     return interaction.reply({
-      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${hours} hours`,
+      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`,
       ephemeral: true
     });
 

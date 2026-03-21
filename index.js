@@ -63,19 +63,26 @@ async function registerCommands() {
 }
 
 // ===== LUARMOR KEY GENERATOR =====
-async function createLuarmorKey(hours) {
+async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
   try {
     const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-      { auth_expire: expiryUnix },
-      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+      {
+        discord_id: discordId,       // Must include for expiry to work
+        auth_expire: expiryUnix      // Unix timestamp in seconds
+      },
+      {
+        headers: {
+          Authorization: process.env.LUARMOR_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      }
     );
 
     console.log('✅ Luarmor response:', JSON.stringify(res.data, null, 2));
 
-    // recursive search for key
     const findKey = obj => {
       if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
       if (typeof obj === 'object' && obj) {
@@ -88,9 +95,9 @@ async function createLuarmorKey(hours) {
     };
 
     const key = findKey(res.data);
-    if (!key) throw new Error(`No key found in response: ${JSON.stringify(res.data)}`);
+    if (!key) throw new Error(`No key found: ${JSON.stringify(res.data)}`);
 
-    return { key, expiry: expiryUnix * 1000 }; // return expiry in ms for Discord slots
+    return { key, expiry: expiryUnix * 1000 }; // expiry in ms
 
   } catch (err) {
     const errorData = err.response?.data || err.message;
@@ -233,14 +240,14 @@ client.on('interactionCreate', async interaction => {
   const hours = creditsToSpend * 2;
 
   try {
-    // ✅ Always generate a fresh key
-    const { key, expiry } = await createLuarmorKey(hours);
+    // ✅ Generate a fresh key with discord_id so Luarmor expiry works
+    const { key, expiry } = await createLuarmorKey(hours, interaction.user.id);
 
     const slotIndex = slots.findIndex(s => !s || s.expiry <= Date.now());
     slots[slotIndex] = {
       userId: interaction.user.id,
-      key,       // NEW key
-      expiry     // matches key expiry
+      key,
+      expiry
     };
 
     userData.credits -= creditsToSpend;

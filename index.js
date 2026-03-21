@@ -70,8 +70,8 @@ async function createLuarmorKey(hours, discordId) {
     const res = await axios.post(
       `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
       {
-        discord_id: discordId,       // Must include for expiry to work
-        auth_expire: expiryUnix      // Unix timestamp in seconds
+        discord_id: discordId,
+        auth_expire: expiryUnix
       },
       {
         headers: {
@@ -114,18 +114,26 @@ function formatTime(ms) {
 
 // ===== SLOTS EMBED =====
 function generateSlotsEmbed() {
-  const embed = new EmbedBuilder().setTitle('🎟️ Global Slots').setColor(0x0099ff);
+  const embed = new EmbedBuilder()
+    .setTitle('🎟️ Global Slots')
+    .setColor(0x0099ff);
+
+  const now = Date.now();
+  const activeSlots = slots.filter(s => s && s.expiry > now).sort((a, b) => a.expiry - b.expiry);
 
   for (let i = 0; i < MAX_SLOTS; i++) {
-    const s = slots[i];
-    if (s && s.expiry > Date.now()) {
-      const user = client.users.cache.get(s.userId);
+    const slot = activeSlots[i];
+    if (slot) {
+      const user = client.users.cache.get(slot.userId);
       embed.addFields({
         name: `Slot ${i + 1}`,
-        value: `🔴 ${user ? user.tag : 'Unknown'}\nExpires in: ${formatTime(s.expiry - Date.now())}`
+        value: `🔴 Taken by ${user ? user.tag : 'Unknown'}\nExpires in: ${formatTime(slot.expiry - now)}`
       });
     } else {
-      embed.addFields({ name: `Slot ${i + 1}`, value: '🟢 Available' });
+      embed.addFields({
+        name: `Slot ${i + 1}`,
+        value: '🟢 Available'
+      });
     }
   }
 
@@ -243,12 +251,13 @@ client.on('interactionCreate', async interaction => {
     // ✅ Generate a fresh key with discord_id so Luarmor expiry works
     const { key, expiry } = await createLuarmorKey(hours, interaction.user.id);
 
-    const slotIndex = slots.findIndex(s => !s || s.expiry <= Date.now());
-    slots[slotIndex] = {
-      userId: interaction.user.id,
-      key,
-      expiry
-    };
+    // Find existing slot for this user (one slot per user)
+    const existingSlotIndex = slots.findIndex(s => s.userId === interaction.user.id && s.expiry > Date.now());
+    if (existingSlotIndex !== -1) {
+      slots[existingSlotIndex] = { userId: interaction.user.id, key, expiry }; // replace existing
+    } else {
+      slots.push({ userId: interaction.user.id, key, expiry });
+    }
 
     userData.credits -= creditsToSpend;
 
@@ -269,7 +278,10 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ===== AUTO CLEANUP =====
-setInterval(() => { slots = slots.filter(s => s && s.expiry > Date.now()); saveSlots(); }, 60000);
+setInterval(() => {
+  slots = slots.filter(s => s && s.expiry > Date.now());
+  saveSlots();
+}, 60000);
 
 // ===== AUTO CRYPTO PAYMENT CHECK =====
 setInterval(async () => {

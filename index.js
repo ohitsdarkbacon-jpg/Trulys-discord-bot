@@ -31,14 +31,25 @@ const MAX_SLOTS = 6;
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2)); }
 
-// ===== COMMANDS =====
+// ===== COMMANDS (FIXED) =====
 const commands = [
-  new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Open panel'),
+
   new SlashCommandBuilder()
     .setName('givecredits')
-    .setDescription('Give credits')
-    .addUserOption(opt => opt.setName('user').setRequired(true))
-    .addIntegerOption(opt => opt.setName('amount').setRequired(true))
+    .setDescription('Give credits to a user')
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('User to give credits to')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Amount of credits')
+        .setRequired(true)
+    )
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -51,7 +62,7 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
-// ===== LUARMOR FIX =====
+// ===== LUARMOR KEY (FIXED) =====
 async function createLuarmorKey(hours) {
   const expiryUnix = Math.floor(Date.now() / 1000) + (hours * 3600);
 
@@ -86,7 +97,7 @@ function formatTime(ms) {
 
 // ===== EMBED =====
 function generateSlotsEmbed() {
-  const embed = new EmbedBuilder().setTitle('🎟️ Slots').setColor(0x0099ff);
+  const embed = new EmbedBuilder().setTitle('🎟️ Global Slots').setColor(0x0099ff);
 
   for (let i = 0; i < MAX_SLOTS; i++) {
     const s = slots[i];
@@ -95,7 +106,7 @@ function generateSlotsEmbed() {
       const user = client.users.cache.get(s.userId);
       embed.addFields({
         name: `Slot ${i + 1}`,
-        value: `🔴 ${user ? user.tag : 'Unknown'}\n${formatTime(s.expiry - Date.now())}`
+        value: `🔴 ${user ? user.tag : 'Unknown'}\nExpires in: ${formatTime(s.expiry - Date.now())}`
       });
     } else {
       embed.addFields({ name: `Slot ${i + 1}`, value: '🟢 Available' });
@@ -105,27 +116,33 @@ function generateSlotsEmbed() {
   return embed;
 }
 
-// ===== COMMANDS =====
+// ===== COMMAND HANDLER =====
 client.on('interactionCreate', async i => {
   if (!i.isChatInputCommand()) return;
 
-  if (i.commandName === 'panel' && process.env.ADMIN_IDS.split(',').includes(i.user.id)) {
+  if (
+    i.commandName === 'panel' &&
+    process.env.ADMIN_IDS.split(',').includes(i.user.id)
+  ) {
     const embed = new EmbedBuilder()
       .setTitle('🔑 Slot System')
-      .setDescription('1 Credit = 2 Hours')
+      .setDescription('1 Credit = 2 Hours\nMax 6 Global Slots')
       .setColor(0x00ff00);
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('get_credits').setLabel('Credits').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('activate_slot').setLabel('Activate').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('view_slots').setLabel('Slots').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('buy_crypto').setLabel('Crypto').setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId('get_credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('activate_slot').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('view_slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('buy_crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
     );
 
     await i.reply({ embeds: [embed, generateSlotsEmbed()], components: [row] });
   }
 
-  if (i.commandName === 'givecredits') {
+  if (
+    i.commandName === 'givecredits' &&
+    process.env.ADMIN_IDS.split(',').includes(i.user.id)
+  ) {
     const u = i.options.getUser('user');
     const amt = i.options.getInteger('amount');
 
@@ -134,7 +151,7 @@ client.on('interactionCreate', async i => {
     users[u.id].credits += amt;
     saveUsers();
 
-    await i.reply(`✅ ${amt} credits given`);
+    await i.reply(`✅ ${amt} credits given to ${u.tag}`);
   }
 });
 
@@ -146,22 +163,22 @@ client.on('interactionCreate', async i => {
   if (!users[id]) users[id] = { credits: 0, processed: [] };
 
   if (i.customId === 'get_credits') {
-    return i.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
+    return i.reply({ content: `💰 You have ${users[id].credits} credits`, ephemeral: true });
   }
 
   if (i.customId === 'activate_slot') {
     if (slots.filter(s => s && s.expiry > Date.now()).length >= MAX_SLOTS)
-      return i.reply({ content: '❌ Full', ephemeral: true });
+      return i.reply({ content: '❌ All slots are full', ephemeral: true });
 
     const modal = new ModalBuilder()
       .setCustomId('activate_modal')
-      .setTitle('Activate');
+      .setTitle('Activate Slot');
 
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('credits_amount')
-          .setLabel('Credits')
+          .setLabel('Credits to spend')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
       )
@@ -186,12 +203,12 @@ client.on('interactionCreate', async i => {
       saveUsers();
 
       await i.reply({
-        content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
+        content: `💳 Send crypto:\nBTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
         ephemeral: true
       });
 
     } catch {
-      i.reply({ content: '❌ Wallet error', ephemeral: true });
+      i.reply({ content: '❌ Failed to generate wallets', ephemeral: true });
     }
   }
 });
@@ -205,7 +222,7 @@ client.on('interactionCreate', async i => {
   const user = users[i.user.id];
 
   if (!credits || credits > user.credits)
-    return i.reply({ content: '❌ Invalid', ephemeral: true });
+    return i.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
 
   const hours = credits * 2;
 
@@ -214,7 +231,7 @@ client.on('interactionCreate', async i => {
 
     const index = slots.findIndex(s => !s || s.expiry <= Date.now());
     if (index === -1)
-      return i.reply({ content: '❌ No slot', ephemeral: true });
+      return i.reply({ content: '❌ No slot available', ephemeral: true });
 
     slots[index] = {
       userId: i.user.id,
@@ -228,12 +245,12 @@ client.on('interactionCreate', async i => {
     saveSlots();
 
     i.reply({
-      content: `✅ Key: ${key}\nExpires in ${hours}h`,
+      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${hours} hours`,
       ephemeral: true
     });
 
-  } catch (err) {
-    i.reply({ content: '❌ Key failed', ephemeral: true });
+  } catch {
+    i.reply({ content: '❌ Failed to generate key', ephemeral: true });
   }
 });
 
@@ -243,7 +260,7 @@ setInterval(() => {
   saveSlots();
 }, 60000);
 
-// ===== CRYPTO CHECK =====
+// ===== CRYPTO AUTO CHECK =====
 setInterval(async () => {
   for (const id in users) {
     const user = users[id];
@@ -260,7 +277,6 @@ setInterval(async () => {
           if (user.processed.includes(tx.tx_hash)) continue;
 
           const amount = tx.value / 1e8;
-
           const price = type === 'btc' ? 60000 : 70;
           const credits = Math.floor(amount * price);
 
@@ -281,7 +297,7 @@ setInterval(async () => {
 
 // ===== READY =====
 client.once('ready', async () => {
-  console.log(`✅ ${client.user.tag}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
 
   https.get('https://api.ipify.org?format=json', res => {

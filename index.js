@@ -149,7 +149,7 @@ client.on('interactionCreate', async interaction => {
 
     const embed = new EmbedBuilder()
       .setTitle('🔑 Slot System')
-      .setDescription('1 Credit = 2 Hours\nMax 6 Global Slots')
+      .setDescription('1 Credit = 1 Hour\nMax 6 Global Slots') // ✅ Updated GUI text
       .setColor(0x00ff00);
 
     const row = new ActionRowBuilder().addComponents(
@@ -245,16 +245,14 @@ client.on('interactionCreate', async interaction => {
   if (slots.filter(s => s && s.expiry > Date.now()).length >= MAX_SLOTS)
     return interaction.reply({ content: '❌ All slots full', ephemeral: true });
 
-  const hours = creditsToSpend * 2;
+  const hours = creditsToSpend; // ✅ 1 credit = 1 hour
 
   try {
-    // ✅ Generate a fresh key with discord_id so Luarmor expiry works
     const { key, expiry } = await createLuarmorKey(hours, interaction.user.id);
 
-    // Find existing slot for this user (one slot per user)
     const existingSlotIndex = slots.findIndex(s => s.userId === interaction.user.id && s.expiry > Date.now());
     if (existingSlotIndex !== -1) {
-      slots[existingSlotIndex] = { userId: interaction.user.id, key, expiry }; // replace existing
+      slots[existingSlotIndex] = { userId: interaction.user.id, key, expiry };
     } else {
       slots.push({ userId: interaction.user.id, key, expiry });
     }

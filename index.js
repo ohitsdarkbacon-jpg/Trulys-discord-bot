@@ -143,7 +143,7 @@ function generateSlotsEmbed() {
 // ===== ADMIN CHECK =====
 const isAdmin = id => process.env.ADMIN_IDS.split(',').includes(id);
 
-// ===== PAUSE SLOT =====
+// ===== PAUSE SLOT (Unwhitelist) =====
 async function pauseSlot(slot) {
   if (!slot || slot.paused) return;
   const now = Date.now();
@@ -154,30 +154,22 @@ async function pauseSlot(slot) {
   slot.expiry = null;
   slot.key = null;
 
-  // Delete Luarmor key immediately
+  // Temporarily unwhitelist user in Luarmor
   try {
-    await axios.delete(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
+    await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}/unwhitelist`,
+      {},
       { headers: { Authorization: process.env.LUARMOR_API_KEY } }
     ).catch(() => {});
   } catch {}
 }
 
-// ===== UNPAUSE SLOT =====
+// ===== UNPAUSE SLOT (Regenerate key) =====
 async function unpauseSlot(slot) {
   if (!slot || !slot.paused) return;
 
   try {
     const seconds = Math.ceil(slot.remaining / 1000);
-
-    // Delete old key just in case
-    await axios.delete(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
-      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-    ).catch(() => {});
-
-    // Small delay to avoid caching issues
-    await new Promise(r => setTimeout(r, 300));
 
     // Create new key for remaining time
     const { key, expiry } = await createLuarmorKey(seconds / 3600, slot.userId);
@@ -227,7 +219,7 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'pauseall' && isAdmin(id)) {
       for (const slot of slots) await pauseSlot(slot);
       saveSlots();
-      return interaction.reply('⏸️ All slots paused (keys deleted)');
+      return interaction.reply('⏸️ All slots paused (unwhitelisted)');
     }
 
     if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
@@ -240,13 +232,6 @@ client.on('interactionCreate', async interaction => {
       const u = interaction.options.getUser('user');
       const index = slots.findIndex(s => s.userId === u.id);
       if (index === -1) return interaction.reply('❌ No slot found');
-
-      try {
-        await axios.delete(
-          `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${u.id}`,
-          { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-        );
-      } catch {}
       slots.splice(index, 1);
       saveSlots();
       return interaction.reply(`✅ Released ${u.tag}`);
@@ -337,12 +322,7 @@ setInterval(async () => {
   const now = Date.now();
   for (let i = slots.length - 1; i >= 0; i--) {
     const s = slots[i];
-    if (!s.paused && s.expiry <= now) {
-      try {
-        await axios.delete(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${s.userId}`, { headers: { Authorization: process.env.LUARMOR_API_KEY } });
-      } catch {}
-      slots.splice(i, 1);
-    }
+    if (!s.paused && s.expiry <= now) slots.splice(i, 1);
   }
   saveSlots();
 }, 60000);

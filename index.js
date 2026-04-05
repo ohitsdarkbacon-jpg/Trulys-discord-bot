@@ -77,7 +77,7 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
-// ===== LUARMOR KEY GENERATION (UNCHANGED) =====
+// ===== LUARMOR KEY GENERATION =====
 async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
@@ -182,8 +182,8 @@ client.on('interactionCreate', async interaction => {
       for (const slot of slots) {
         if (slot && !slot.paused && slot.expiry > now) {
           slot.paused = true;
-          slot.pausedAt = now;                 // mark when pause started
-          slot.remaining = slot.expiry - now;  // store remaining time
+          slot.pausedAt = now;
+          slot.remaining = slot.expiry - now;
 
           // Delete Luarmor key
           try {
@@ -200,21 +200,26 @@ client.on('interactionCreate', async interaction => {
 
     // ===== UNPAUSE ALL =====
     if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
-      const now = Date.now();
-
       for (const slot of slots) {
         if (slot && slot.paused) {
-          const hours = Math.ceil(slot.remaining / 3600000); // convert ms to hours
-          try {
-            const { key, expiry } = await createLuarmorKey(hours, slot.userId);
+          const seconds = Math.ceil(slot.remaining / 1000);
 
+          try {
+            // Delete old key just in case
+            await axios.delete(
+              `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
+              { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+            ).catch(() => {});
+
+            // Create new key with exact remaining time
+            const { key, expiry } = await createLuarmorKey(seconds / 3600, slot.userId); // convert sec → hours
             slot.key = key;
             slot.expiry = expiry;
             slot.paused = false;
             slot.pausedAt = null;
             slot.remaining = null;
 
-            // DM user their new key
+            // DM user
             try {
               const userObj = await client.users.fetch(slot.userId);
               await userObj.send(`🔑 Your new key after pause: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`);

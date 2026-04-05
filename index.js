@@ -23,52 +23,37 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const USERS_FILE = './users.json';
 const SLOTS_FILE = './slots.json';
 
-if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '{}');
-if (!fs.existsSync(SLOTS_FILE)) fs.writeFileSync(SLOTS_FILE, '[]');
-
-let users = JSON.parse(fs.readFileSync(USERS_FILE));
-let slots = JSON.parse(fs.readFileSync(SLOTS_FILE));
+let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
+let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
 
 const MAX_SLOTS = 6;
 
-// ===== SAVE =====
-const saveUsers = () => fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-const saveSlots = () => fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2));
+function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
+function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2)); }
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder().setName('panel').setDescription('Open admin panel'),
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Open panel'),
 
   new SlashCommandBuilder()
     .setName('givecredits')
     .setDescription('Give credits to a user')
-    .addUserOption(o =>
-      o.setName('user')
-       .setDescription('The user to give credits to')
-       .setRequired(true)
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('User to give credits to')
+        .setRequired(true)
     )
-    .addIntegerOption(o =>
-      o.setName('amount')
-       .setDescription('Amount of credits to give')
-       .setRequired(true)
-    ),
-
-  new SlashCommandBuilder().setName('pauseall').setDescription('Pause all active slots'),
-  new SlashCommandBuilder().setName('unpauseall').setDescription('Unpause all paused slots'),
-
-  new SlashCommandBuilder()
-    .setName('releaseslot')
-    .setDescription('Release a user’s slot')
-    .addUserOption(o =>
-      o.setName('user')
-       .setDescription('User whose slot to release')
-       .setRequired(true)
-    ),
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Amount of credits')
+        .setRequired(true)
+    )
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
-// ===== REGISTER =====
 async function registerCommands() {
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
@@ -77,208 +62,173 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
-// ===== LUARMOR KEY GENERATION =====
+// ===== LUARMOR KEY GENERATOR =====
 async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
-  const res = await axios.post(
-    `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-    { discord_id: discordId, auth_expire: expiryUnix },
-    { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
-  );
-
-  const findKey = obj => {
-    if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
-    if (typeof obj === 'object' && obj) {
-      for (const val of Object.values(obj)) {
-        const k = findKey(val);
-        if (k) return k;
+  try {
+    const res = await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      {
+        discord_id: discordId,
+        auth_expire: expiryUnix
+      },
+      {
+        headers: {
+          Authorization: process.env.LUARMOR_API_KEY,
+          'Content-Type': 'application/json'
+        }
       }
-    }
-    return null;
-  };
+    );
 
-  const key = findKey(res.data);
-  if (!key) throw new Error('No key found');
+    console.log('✅ Luarmor response:', JSON.stringify(res.data, null, 2));
 
-  return { key, expiry: expiryUnix * 1000 };
+    const findKey = obj => {
+      if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
+      if (typeof obj === 'object' && obj) {
+        for (const val of Object.values(obj)) {
+          const k = findKey(val);
+          if (k) return k;
+        }
+      }
+      return null;
+    };
+
+    const key = findKey(res.data);
+    if (!key) throw new Error(`No key found: ${JSON.stringify(res.data)}`);
+
+    return { key, expiry: expiryUnix * 1000 }; // expiry in ms
+
+  } catch (err) {
+    const errorData = err.response?.data || err.message;
+    console.error('❌ Luarmor FULL error:', errorData);
+    throw new Error(typeof errorData === 'string' ? errorData : JSON.stringify(errorData, null, 2));
+  }
 }
 
-// ===== TIME =====
-const formatTime = ms => {
+// ===== TIME FORMAT =====
+function formatTime(ms) {
   const m = Math.floor(ms / 60000);
   return `${Math.floor(m / 60)}h ${m % 60}m`;
-};
+}
 
-// ===== EMBED =====
+// ===== SLOTS EMBED =====
 function generateSlotsEmbed() {
-  const embed = new EmbedBuilder().setTitle('🎟️ Global Slots').setColor(0x0099ff);
-  const now = Date.now();
+  const embed = new EmbedBuilder()
+    .setTitle('🎟️ Global Slots')
+    .setColor(0x0099ff);
 
-  const active = slots
-    .filter(s => s)
-    .sort((a, b) => (a.paused ? 1 : 0) - (b.paused ? 1 : 0));
+  const now = Date.now();
+  const activeSlots = slots.filter(s => s && s.expiry > now).sort((a, b) => a.expiry - b.expiry);
 
   for (let i = 0; i < MAX_SLOTS; i++) {
-    const slot = active[i];
-
+    const slot = activeSlots[i];
     if (slot) {
       const user = client.users.cache.get(slot.userId);
-      const time = slot.paused ? slot.remaining : slot.expiry - now;
-
       embed.addFields({
         name: `Slot ${i + 1}`,
-        value: slot.paused
-          ? `⏸️ ${user?.tag || 'Unknown'}\nRemaining: ${formatTime(time)}`
-          : `🔴 ${user?.tag || 'Unknown'}\nExpires in: ${formatTime(time)}`
+        value: `🔴 Taken by ${user ? user.tag : 'Unknown'}\nExpires in: ${formatTime(slot.expiry - now)}`
       });
     } else {
-      embed.addFields({ name: `Slot ${i + 1}`, value: '🟢 Available' });
+      embed.addFields({
+        name: `Slot ${i + 1}`,
+        value: '🟢 Available'
+      });
     }
   }
 
   return embed;
 }
 
-// ===== ADMIN CHECK =====
-const isAdmin = id => process.env.ADMIN_IDS.split(',').includes(id);
-
-// ===== PAUSE SLOT (Unwhitelist) =====
-async function pauseSlot(slot) {
-  if (!slot || slot.paused) return;
-  const now = Date.now();
-
-  slot.remaining = slot.expiry - now;
-  slot.paused = true;
-  slot.pausedAt = now;
-  slot.expiry = null;
-  slot.key = null;
-
-  // Temporarily unwhitelist user in Luarmor
-  try {
-    await axios.post(
-      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}/unwhitelist`,
-      {},
-      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-    ).catch(() => {});
-  } catch {}
-}
-
-// ===== UNPAUSE SLOT (Regenerate key) =====
-async function unpauseSlot(slot) {
-  if (!slot || !slot.paused) return;
-
-  try {
-    const seconds = Math.ceil(slot.remaining / 1000);
-
-    // Create new key for remaining time
-    const { key, expiry } = await createLuarmorKey(seconds / 3600, slot.userId);
-
-    slot.key = key;
-    slot.expiry = expiry;
-    slot.paused = false;
-    slot.pausedAt = null;
-    slot.remaining = null;
-
-    // DM user
-    try {
-      const userObj = await client.users.fetch(slot.userId);
-      await userObj.send(`🔑 Your new key after pause: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`);
-    } catch {}
-  } catch (err) {
-    console.error(`Failed to unpause slot for ${slot.userId}:`, err.message);
-  }
-}
-
 // ===== COMMAND HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
-  try {
-    if (interaction.commandName === 'panel' && isAdmin(id)) {
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('activate').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
-      );
-      return interaction.reply({ embeds: [generateSlotsEmbed()], components: [row] });
-    }
+  if (interaction.commandName === 'panel' &&
+      process.env.ADMIN_IDS.split(',').includes(interaction.user.id)) {
 
-    if (interaction.commandName === 'givecredits' && isAdmin(id)) {
-      const target = interaction.options.getUser('user');
-      const amount = interaction.options.getInteger('amount');
-      if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
-      users[target.id].credits += amount;
-      saveUsers();
-      return interaction.reply(`✅ Gave ${amount} credits to ${target.tag}`);
-    }
+    const embed = new EmbedBuilder()
+      .setTitle('🔑 Slot System')
+      .setDescription('1 Credit = 1 Hour\nMax 6 Global Slots') // ✅ Updated GUI text
+      .setColor(0x00ff00);
 
-    if (interaction.commandName === 'pauseall' && isAdmin(id)) {
-      for (const slot of slots) await pauseSlot(slot);
-      saveSlots();
-      return interaction.reply('⏸️ All slots paused (unwhitelisted)');
-    }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('get_credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('activate_slot').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('view_slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('buy_crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
+    );
 
-    if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
-      for (const slot of slots) await unpauseSlot(slot);
-      saveSlots();
-      return interaction.reply('▶️ All slots unpaused and new keys generated');
-    }
+    await interaction.reply({ embeds: [embed, generateSlotsEmbed()], components: [row] });
+  }
 
-    if (interaction.commandName === 'releaseslot' && isAdmin(id)) {
-      const u = interaction.options.getUser('user');
-      const index = slots.findIndex(s => s.userId === u.id);
-      if (index === -1) return interaction.reply('❌ No slot found');
-      slots.splice(index, 1);
-      saveSlots();
-      return interaction.reply(`✅ Released ${u.tag}`);
-    }
-  } catch (err) {
-    console.error(err);
-    if (!interaction.replied) interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
+  if (interaction.commandName === 'givecredits' &&
+      process.env.ADMIN_IDS.split(',').includes(interaction.user.id)) {
+
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+
+    if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
+    users[target.id].credits += amount;
+    saveUsers();
+
+    await interaction.reply(`✅ Gave **${amount} credits** to ${target.tag}`);
   }
 });
 
 // ===== BUTTON HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
-  const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
+  const userId = interaction.user.id;
+  if (!users[userId]) users[userId] = { credits: 0, processed: [], btc: null, ltc: null };
 
-  try {
-    if (interaction.customId === 'credits') return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
-    if (interaction.customId === 'slots') return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
+  if (interaction.customId === 'get_credits') {
+    return interaction.reply({ content: `💰 You have ${users[userId].credits} credits`, ephemeral: true });
+  }
 
-    if (interaction.customId === 'activate') {
-      if (users[id].credits <= 0) return interaction.reply({ content: '❌ You have no credits', ephemeral: true });
-      if (slots.filter(s => !s.paused).length >= MAX_SLOTS) return interaction.reply({ content: '❌ All slots full', ephemeral: true });
+  if (interaction.customId === 'activate_slot') {
+    if (slots.filter(s => s && s.expiry > Date.now()).length >= MAX_SLOTS)
+      return interaction.reply({ content: '❌ All slots are full!', ephemeral: true });
 
-      const modal = new ModalBuilder().setCustomId('activate_modal').setTitle('Activate Slot');
-      const input = new TextInputBuilder()
-        .setCustomId('credits_amount')
-        .setLabel('Credits to spend (1 credit = 1 hour)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      const row = new ActionRowBuilder().addComponents(input);
-      modal.addComponents(row);
-      return interaction.showModal(modal);
-    }
+    const modal = new ModalBuilder()
+      .setCustomId('activate_modal')
+      .setTitle('Activate Slot');
 
-    if (interaction.customId === 'crypto') {
-      const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
-      const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
-      users[id].btc = btc.data.address;
-      users[id].ltc = ltc.data.address;
-      users[id].processed = [];
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('credits_amount')
+          .setLabel('Credits to spend')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      )
+    );
+
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.customId === 'view_slots') {
+    return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
+  }
+
+  if (interaction.customId === 'buy_crypto') {
+    try {
+      const btcAddr = await axios.post('https://api.blockcypher.com/v1/btc/main/addrs', {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
+      const ltcAddr = await axios.post('https://api.blockcypher.com/v1/ltc/main/addrs', {}, { params: { token: process.env.BLOCKCYPHER_TOKEN } });
+
+      users[userId].btc = btcAddr.data.address;
+      users[userId].ltc = ltcAddr.data.address;
+      users[userId].processed = [];
       saveUsers();
-      return interaction.reply({ content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`, ephemeral: true });
+
+      return interaction.reply({
+        content: `💳 Send crypto to get credits automatically:\nBTC: ${users[userId].btc}\nLTC: ${users[userId].ltc}`,
+        ephemeral: true
+      });
+
+    } catch (err) {
+      return interaction.reply({ content: `❌ Failed to generate wallets\n${err.message}`, ephemeral: true });
     }
-  } catch (err) {
-    console.error(err);
-    if (!interaction.replied) interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
   }
 });
 
@@ -286,62 +236,66 @@ client.on('interactionCreate', async interaction => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isModalSubmit() || interaction.customId !== 'activate_modal') return;
 
-  const id = interaction.user.id;
   const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
-  const userData = users[id];
+  const userData = users[interaction.user.id];
 
   if (!creditsToSpend || creditsToSpend > userData.credits)
     return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
 
-  if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
+  if (slots.filter(s => s && s.expiry > Date.now()).length >= MAX_SLOTS)
     return interaction.reply({ content: '❌ All slots full', ephemeral: true });
 
-  try {
-    const { key, expiry } = await createLuarmorKey(creditsToSpend, id);
+  const hours = creditsToSpend; // ✅ 1 credit = 1 hour
 
-    const existingSlotIndex = slots.findIndex(s => s.userId === id && !s.paused);
+  try {
+    const { key, expiry } = await createLuarmorKey(hours, interaction.user.id);
+
+    const existingSlotIndex = slots.findIndex(s => s.userId === interaction.user.id && s.expiry > Date.now());
     if (existingSlotIndex !== -1) {
-      slots[existingSlotIndex] = { userId: id, key, expiry, paused: false, remaining: null };
+      slots[existingSlotIndex] = { userId: interaction.user.id, key, expiry };
     } else {
-      slots.push({ userId: id, key, expiry, paused: false, remaining: null });
+      slots.push({ userId: interaction.user.id, key, expiry });
     }
 
     userData.credits -= creditsToSpend;
+
     saveUsers();
     saveSlots();
 
-    return interaction.reply({ content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`, ephemeral: true });
+    return interaction.reply({
+      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`,
+      ephemeral: true
+    });
+
   } catch (err) {
-    console.error(err);
-    return interaction.reply({ content: `❌ Luarmor Error:\n${err.message}`, ephemeral: true });
+    return interaction.reply({
+      content: `❌ Luarmor Error:\n\`\`\`json\n${err.message.slice(0, 1800)}\n\`\`\``,
+      ephemeral: true
+    });
   }
 });
 
 // ===== AUTO CLEANUP =====
-setInterval(async () => {
-  const now = Date.now();
-  for (let i = slots.length - 1; i >= 0; i--) {
-    const s = slots[i];
-    if (!s.paused && s.expiry <= now) slots.splice(i, 1);
-  }
+setInterval(() => {
+  slots = slots.filter(s => s && s.expiry > Date.now());
   saveSlots();
 }, 60000);
 
-// ===== CRYPTO CHECK =====
+// ===== AUTO CRYPTO PAYMENT CHECK =====
 setInterval(async () => {
   for (const id in users) {
-    const u = users[id];
+    const user = users[id];
     for (const type of ['btc', 'ltc']) {
-      if (!u[type]) continue;
+      if (!user[type]) continue;
       try {
-        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${u[type]}`);
+        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${user[type]}`);
         const txs = res.data.txrefs || [];
         for (const tx of txs) {
-          if (tx.confirmations < 1 || u.processed.includes(tx.tx_hash)) continue;
+          if (tx.confirmations < 1 || user.processed.includes(tx.tx_hash)) continue;
           const credits = Math.floor(tx.value / 100000);
           if (credits > 0) {
-            u.credits += credits;
-            u.processed.push(tx.tx_hash);
+            user.credits += credits;
+            user.processed.push(tx.tx_hash);
             console.log(`💰 Added ${credits} credits to ${id}`);
           }
         }
@@ -359,7 +313,7 @@ client.once('ready', async () => {
   https.get('https://api.ipify.org?format=json', res => {
     let data = '';
     res.on('data', chunk => data += chunk);
-    res.on('end', () => console.log('🌐 Outbound IP:', JSON.parse(data).ip));
+    res.on('end', () => { try { console.log('Outbound IP:', JSON.parse(data).ip); } catch {} });
   });
 });
 

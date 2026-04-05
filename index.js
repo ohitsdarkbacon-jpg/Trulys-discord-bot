@@ -143,16 +143,68 @@ function generateSlotsEmbed() {
 // ===== ADMIN CHECK =====
 const isAdmin = id => process.env.ADMIN_IDS.split(',').includes(id);
 
+// ===== PAUSE SLOT =====
+async function pauseSlot(slot) {
+  if (!slot || slot.paused) return;
+  const now = Date.now();
+
+  slot.remaining = slot.expiry - now;
+  slot.paused = true;
+  slot.pausedAt = now;
+  slot.expiry = null;
+  slot.key = null;
+
+  // Delete Luarmor key immediately
+  try {
+    await axios.delete(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
+      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+    ).catch(() => {});
+  } catch {}
+}
+
+// ===== UNPAUSE SLOT =====
+async function unpauseSlot(slot) {
+  if (!slot || !slot.paused) return;
+
+  try {
+    const seconds = Math.ceil(slot.remaining / 1000);
+
+    // Delete old key just in case
+    await axios.delete(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
+      { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+    ).catch(() => {});
+
+    // Small delay to avoid caching issues
+    await new Promise(r => setTimeout(r, 300));
+
+    // Create new key for remaining time
+    const { key, expiry } = await createLuarmorKey(seconds / 3600, slot.userId);
+
+    slot.key = key;
+    slot.expiry = expiry;
+    slot.paused = false;
+    slot.pausedAt = null;
+    slot.remaining = null;
+
+    // DM user
+    try {
+      const userObj = await client.users.fetch(slot.userId);
+      await userObj.send(`🔑 Your new key after pause: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`);
+    } catch {}
+  } catch (err) {
+    console.error(`Failed to unpause slot for ${slot.userId}:`, err.message);
+  }
+}
+
 // ===== COMMAND HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-
   const id = interaction.user.id;
-
   if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
   try {
-    // ===== PANEL =====
     if (interaction.commandName === 'panel' && isAdmin(id)) {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
@@ -160,85 +212,34 @@ client.on('interactionCreate', async interaction => {
         new ButtonBuilder().setCustomId('slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
       );
-
       return interaction.reply({ embeds: [generateSlotsEmbed()], components: [row] });
     }
 
-    // ===== GIVE CREDITS =====
     if (interaction.commandName === 'givecredits' && isAdmin(id)) {
       const target = interaction.options.getUser('user');
       const amount = interaction.options.getInteger('amount');
-
       if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
       users[target.id].credits += amount;
       saveUsers();
-
       return interaction.reply(`✅ Gave ${amount} credits to ${target.tag}`);
     }
 
-    // ===== PAUSE ALL =====
     if (interaction.commandName === 'pauseall' && isAdmin(id)) {
-      const now = Date.now();
-      for (const slot of slots) {
-        if (slot && !slot.paused && slot.expiry > now) {
-          slot.paused = true;
-          slot.pausedAt = now;
-          slot.remaining = slot.expiry - now;
-
-          // Delete Luarmor key
-          try {
-            await axios.delete(
-              `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
-              { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-            );
-          } catch {}
-        }
-      }
+      for (const slot of slots) await pauseSlot(slot);
       saveSlots();
       return interaction.reply('⏸️ All slots paused (keys deleted)');
     }
 
-    // ===== UNPAUSE ALL =====
     if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
-      for (const slot of slots) {
-        if (slot && slot.paused) {
-          const seconds = Math.ceil(slot.remaining / 1000);
-
-          try {
-            // Delete old key just in case
-            await axios.delete(
-              `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
-              { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-            ).catch(() => {});
-
-            // Create new key with exact remaining time
-            const { key, expiry } = await createLuarmorKey(seconds / 3600, slot.userId); // convert sec → hours
-            slot.key = key;
-            slot.expiry = expiry;
-            slot.paused = false;
-            slot.pausedAt = null;
-            slot.remaining = null;
-
-            // DM user
-            try {
-              const userObj = await client.users.fetch(slot.userId);
-              await userObj.send(`🔑 Your new key after pause: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`);
-            } catch {}
-          } catch (err) {
-            console.error(`Failed to unpause slot for ${slot.userId}:`, err.message);
-          }
-        }
-      }
-
+      for (const slot of slots) await unpauseSlot(slot);
       saveSlots();
       return interaction.reply('▶️ All slots unpaused and new keys generated');
     }
 
-    // ===== RELEASE SLOT =====
     if (interaction.commandName === 'releaseslot' && isAdmin(id)) {
       const u = interaction.options.getUser('user');
       const index = slots.findIndex(s => s.userId === u.id);
-      if (index === -1) return interaction.reply('❌ No slot');
+      if (index === -1) return interaction.reply('❌ No slot found');
 
       try {
         await axios.delete(
@@ -246,89 +247,61 @@ client.on('interactionCreate', async interaction => {
           { headers: { Authorization: process.env.LUARMOR_API_KEY } }
         );
       } catch {}
-
       slots.splice(index, 1);
       saveSlots();
       return interaction.reply(`✅ Released ${u.tag}`);
     }
   } catch (err) {
     console.error(err);
-    if (!interaction.replied) {
-      return interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
-    }
+    if (!interaction.replied) interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
   }
 });
 
 // ===== BUTTON HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
-
   const id = interaction.user.id;
   if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
   try {
-    if (interaction.customId === 'credits') {
-      return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
-    }
+    if (interaction.customId === 'credits') return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
+    if (interaction.customId === 'slots') return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
 
     if (interaction.customId === 'activate') {
-      if (users[id].credits <= 0)
-        return interaction.reply({ content: '❌ You have no credits', ephemeral: true });
+      if (users[id].credits <= 0) return interaction.reply({ content: '❌ You have no credits', ephemeral: true });
+      if (slots.filter(s => !s.paused).length >= MAX_SLOTS) return interaction.reply({ content: '❌ All slots full', ephemeral: true });
 
-      if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
-        return interaction.reply({ content: '❌ All slots full', ephemeral: true });
-
-      // Show modal to ask how many credits to spend
-      const modal = new ModalBuilder()
-        .setCustomId('activate_modal')
-        .setTitle('Activate Slot');
-
+      const modal = new ModalBuilder().setCustomId('activate_modal').setTitle('Activate Slot');
       const input = new TextInputBuilder()
         .setCustomId('credits_amount')
-        .setLabel(`Credits to spend (1 credit = 1 hour)`)
+        .setLabel('Credits to spend (1 credit = 1 hour)')
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
-
       const row = new ActionRowBuilder().addComponents(input);
       modal.addComponents(row);
-
       return interaction.showModal(modal);
-    }
-
-    if (interaction.customId === 'slots') {
-      return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
     }
 
     if (interaction.customId === 'crypto') {
       const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
       const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
-
       users[id].btc = btc.data.address;
       users[id].ltc = ltc.data.address;
       users[id].processed = [];
       saveUsers();
-
-      return interaction.reply({
-        content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
-        ephemeral: true
-      });
+      return interaction.reply({ content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`, ephemeral: true });
     }
   } catch (err) {
     console.error(err);
-    if (!interaction.replied) {
-      return interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
-    }
+    if (!interaction.replied) interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
   }
 });
 
 // ===== MODAL HANDLER =====
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  if (interaction.customId !== 'activate_modal') return;
+  if (!interaction.isModalSubmit() || interaction.customId !== 'activate_modal') return;
 
   const id = interaction.user.id;
-  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
-
   const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
   const userData = users[id];
 
@@ -339,7 +312,6 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: '❌ All slots full', ephemeral: true });
 
   try {
-    // 1 credit = 1 hour
     const { key, expiry } = await createLuarmorKey(creditsToSpend, id);
 
     const existingSlotIndex = slots.findIndex(s => s.userId === id && !s.paused);
@@ -350,35 +322,24 @@ client.on('interactionCreate', async interaction => {
     }
 
     userData.credits -= creditsToSpend;
-
     saveUsers();
     saveSlots();
 
-    return interaction.reply({
-      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`,
-      ephemeral: true
-    });
-
+    return interaction.reply({ content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`, ephemeral: true });
   } catch (err) {
     console.error(err);
-    return interaction.reply({
-      content: `❌ Luarmor Error:\n${err.message}`,
-      ephemeral: true
-    });
+    return interaction.reply({ content: `❌ Luarmor Error:\n${err.message}`, ephemeral: true });
   }
 });
 
-// ===== AUTO CLEANUP (EXPIRED KEYS) =====
+// ===== AUTO CLEANUP =====
 setInterval(async () => {
   const now = Date.now();
   for (let i = slots.length - 1; i >= 0; i--) {
     const s = slots[i];
     if (!s.paused && s.expiry <= now) {
       try {
-        await axios.delete(
-          `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${s.userId}`,
-          { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-        );
+        await axios.delete(`https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${s.userId}`, { headers: { Authorization: process.env.LUARMOR_API_KEY } });
       } catch {}
       slots.splice(i, 1);
     }

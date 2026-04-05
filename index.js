@@ -181,8 +181,11 @@ client.on('interactionCreate', async interaction => {
       const now = Date.now();
       for (const slot of slots) {
         if (slot && !slot.paused && slot.expiry > now) {
-          slot.remaining = slot.expiry - now;
           slot.paused = true;
+          slot.pausedAt = now;                 // mark when pause started
+          slot.remaining = slot.expiry - now;  // store remaining time
+
+          // Delete Luarmor key
           try {
             await axios.delete(
               `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
@@ -192,29 +195,38 @@ client.on('interactionCreate', async interaction => {
         }
       }
       saveSlots();
-      return interaction.reply('⏸️ All slots paused');
+      return interaction.reply('⏸️ All slots paused (keys deleted)');
     }
 
     // ===== UNPAUSE ALL =====
     if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
+      const now = Date.now();
+
       for (const slot of slots) {
         if (slot && slot.paused) {
-          const hours = Math.ceil(slot.remaining / 3600000);
-          const { key, expiry } = await createLuarmorKey(hours, slot.userId);
-
-          slot.key = key;
-          slot.expiry = expiry;
-          slot.paused = false;
-          slot.remaining = null;
-
+          const hours = Math.ceil(slot.remaining / 3600000); // convert ms to hours
           try {
-            const userObj = await client.users.fetch(slot.userId);
-            await userObj.send(`🔑 Your new key: ${key}`);
-          } catch {}
+            const { key, expiry } = await createLuarmorKey(hours, slot.userId);
+
+            slot.key = key;
+            slot.expiry = expiry;
+            slot.paused = false;
+            slot.pausedAt = null;
+            slot.remaining = null;
+
+            // DM user their new key
+            try {
+              const userObj = await client.users.fetch(slot.userId);
+              await userObj.send(`🔑 Your new key after pause: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`);
+            } catch {}
+          } catch (err) {
+            console.error(`Failed to unpause slot for ${slot.userId}:`, err.message);
+          }
         }
       }
+
       saveSlots();
-      return interaction.reply('▶️ All slots restored');
+      return interaction.reply('▶️ All slots unpaused and new keys generated');
     }
 
     // ===== RELEASE SLOT =====

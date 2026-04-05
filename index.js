@@ -23,8 +23,11 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const USERS_FILE = './users.json';
 const SLOTS_FILE = './slots.json';
 
-let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
-let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
+if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '{}');
+if (!fs.existsSync(SLOTS_FILE)) fs.writeFileSync(SLOTS_FILE, '[]');
+
+let users = JSON.parse(fs.readFileSync(USERS_FILE));
+let slots = JSON.parse(fs.readFileSync(SLOTS_FILE));
 
 const MAX_SLOTS = 6;
 
@@ -34,21 +37,33 @@ const saveSlots = () => fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null,
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
+  new SlashCommandBuilder().setName('panel').setDescription('Open admin panel'),
 
   new SlashCommandBuilder()
     .setName('givecredits')
-    .setDescription('Give credits')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true)),
+    .setDescription('Give credits to a user')
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('The user to give credits to') // ✅ required
+       .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('amount')
+       .setDescription('Amount of credits to give') // ✅ required
+       .setRequired(true)
+    ),
 
-  new SlashCommandBuilder().setName('pauseall').setDescription('Pause all slots'),
-  new SlashCommandBuilder().setName('unpauseall').setDescription('Unpause all slots'),
+  new SlashCommandBuilder().setName('pauseall').setDescription('Pause all active slots'),
+  new SlashCommandBuilder().setName('unpauseall').setDescription('Unpause all paused slots'),
 
   new SlashCommandBuilder()
     .setName('releaseslot')
-    .setDescription('Release slot')
-    .addUserOption(o => o.setName('user').setRequired(true))
+    .setDescription('Release a user’s slot')
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('User whose slot to release') // ✅ required
+       .setRequired(true)
+    ),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -62,22 +77,14 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
-// ===== LUARMOR (UNCHANGED) =====
+// ===== LUARMOR KEY GENERATION (UNCHANGED) =====
 async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
   const res = await axios.post(
     `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-    {
-      discord_id: discordId,
-      auth_expire: expiryUnix
-    },
-    {
-      headers: {
-        Authorization: process.env.LUARMOR_API_KEY,
-        'Content-Type': 'application/json'
-      }
-    }
+    { discord_id: discordId, auth_expire: expiryUnix },
+    { headers: { Authorization: process.env.LUARMOR_API_KEY, 'Content-Type': 'application/json' } }
   );
 
   const findKey = obj => {
@@ -140,7 +147,12 @@ const isAdmin = id => process.env.ADMIN_IDS.split(',').includes(id);
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === 'panel' && isAdmin(interaction.user.id)) {
+  const id = interaction.user.id;
+
+  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
+
+  // ===== PANEL =====
+  if (interaction.commandName === 'panel' && isAdmin(id)) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('activate').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
@@ -151,21 +163,21 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ embeds: [generateSlotsEmbed()], components: [row] });
   }
 
-  if (interaction.commandName === 'givecredits' && isAdmin(interaction.user.id)) {
-    const u = interaction.options.getUser('user');
-    const amt = interaction.options.getInteger('amount');
+  // ===== GIVE CREDITS =====
+  if (interaction.commandName === 'givecredits' && isAdmin(id)) {
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
 
-    if (!users[u.id]) users[u.id] = { credits: 0, processed: [], btc: null, ltc: null };
-    users[u.id].credits += amt;
-
+    if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
+    users[target.id].credits += amount;
     saveUsers();
-    return interaction.reply(`✅ Gave ${amt} credits to ${u.tag}`);
+
+    return interaction.reply(`✅ Gave ${amount} credits to ${target.tag}`);
   }
 
-  // ===== PAUSE =====
-  if (interaction.commandName === 'pauseall' && isAdmin(interaction.user.id)) {
+  // ===== PAUSE ALL =====
+  if (interaction.commandName === 'pauseall' && isAdmin(id)) {
     const now = Date.now();
-
     for (const slot of slots) {
       if (slot && !slot.paused && slot.expiry > now) {
         slot.remaining = slot.expiry - now;
@@ -179,13 +191,12 @@ client.on('interactionCreate', async interaction => {
         } catch {}
       }
     }
-
     saveSlots();
     return interaction.reply('⏸️ All slots paused');
   }
 
-  // ===== UNPAUSE =====
-  if (interaction.commandName === 'unpauseall' && isAdmin(interaction.user.id)) {
+  // ===== UNPAUSE ALL =====
+  if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
     for (const slot of slots) {
       if (slot && slot.paused) {
         const hours = Math.ceil(slot.remaining / 3600000);
@@ -197,15 +208,13 @@ client.on('interactionCreate', async interaction => {
         slot.remaining = null;
       }
     }
-
     saveSlots();
     return interaction.reply('▶️ All slots restored');
   }
 
-  // ===== RELEASE =====
-  if (interaction.commandName === 'releaseslot' && isAdmin(interaction.user.id)) {
+  // ===== RELEASE SLOT =====
+  if (interaction.commandName === 'releaseslot' && isAdmin(id)) {
     const u = interaction.options.getUser('user');
-
     const index = slots.findIndex(s => s.userId === u.id);
     if (index === -1) return interaction.reply('❌ No slot');
 
@@ -218,24 +227,21 @@ client.on('interactionCreate', async interaction => {
 
     slots.splice(index, 1);
     saveSlots();
-
     return interaction.reply(`✅ Released ${u.tag}`);
   }
 });
 
-// ===== BUTTONS =====
+// ===== BUTTON HANDLER =====
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
   const id = interaction.user.id;
   if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
-  // credits
   if (interaction.customId === 'credits') {
     return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
   }
 
-  // activate
   if (interaction.customId === 'activate') {
     if (users[id].credits <= 0)
       return interaction.reply({ content: '❌ No credits', ephemeral: true });
@@ -243,9 +249,8 @@ client.on('interactionCreate', async interaction => {
     if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
       return interaction.reply({ content: '❌ Slots full', ephemeral: true });
 
-    let slot = slots.find(s => s.userId === id);
-
     const { key, expiry } = await createLuarmorKey(1, id);
+    const slot = slots.find(s => s.userId === id);
 
     if (slot) {
       slot.key = key;
@@ -256,19 +261,16 @@ client.on('interactionCreate', async interaction => {
     }
 
     users[id].credits -= 1;
-
     saveUsers();
     saveSlots();
 
     return interaction.reply({ content: `🔑 ${key}`, ephemeral: true });
   }
 
-  // slots
   if (interaction.customId === 'slots') {
     return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
   }
 
-  // crypto
   if (interaction.customId === 'crypto') {
     const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
     const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
@@ -276,7 +278,6 @@ client.on('interactionCreate', async interaction => {
     users[id].btc = btc.data.address;
     users[id].ltc = ltc.data.address;
     users[id].processed = [];
-
     saveUsers();
 
     return interaction.reply({
@@ -289,7 +290,6 @@ client.on('interactionCreate', async interaction => {
 // ===== AUTO CLEANUP (EXPIRED KEYS) =====
 setInterval(async () => {
   const now = Date.now();
-
   for (let i = slots.length - 1; i >= 0; i--) {
     const s = slots[i];
     if (!s.paused && s.expiry <= now) {
@@ -299,11 +299,9 @@ setInterval(async () => {
           { headers: { Authorization: process.env.LUARMOR_API_KEY } }
         );
       } catch {}
-
       slots.splice(i, 1);
     }
   }
-
   saveSlots();
 }, 60000);
 
@@ -311,17 +309,13 @@ setInterval(async () => {
 setInterval(async () => {
   for (const id in users) {
     const u = users[id];
-
     for (const type of ['btc', 'ltc']) {
       if (!u[type]) continue;
-
       try {
         const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${u[type]}`);
         const txs = res.data.txrefs || [];
-
         for (const tx of txs) {
           if (tx.confirmations < 1 || u.processed.includes(tx.tx_hash)) continue;
-
           const credits = Math.floor(tx.value / 100000);
           if (credits > 0) {
             u.credits += credits;
@@ -332,7 +326,6 @@ setInterval(async () => {
       } catch {}
     }
   }
-
   saveUsers();
 }, 20000);
 
@@ -343,7 +336,7 @@ client.once('ready', async () => {
 
   https.get('https://api.ipify.org?format=json', res => {
     let data = '';
-    res.on('data', c => data += c);
+    res.on('data', chunk => data += chunk);
     res.on('end', () => console.log('🌐 Outbound IP:', JSON.parse(data).ip));
   });
 });

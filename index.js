@@ -183,7 +183,6 @@ client.on('interactionCreate', async interaction => {
         if (slot && !slot.paused && slot.expiry > now) {
           slot.remaining = slot.expiry - now;
           slot.paused = true;
-
           try {
             await axios.delete(
               `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
@@ -208,7 +207,6 @@ client.on('interactionCreate', async interaction => {
           slot.paused = false;
           slot.remaining = null;
 
-          // DM user with new key
           try {
             const userObj = await client.users.fetch(slot.userId);
             await userObj.send(`🔑 Your new key: ${key}`);
@@ -258,28 +256,26 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.customId === 'activate') {
       if (users[id].credits <= 0)
-        return interaction.reply({ content: '❌ No credits', ephemeral: true });
+        return interaction.reply({ content: '❌ You have no credits', ephemeral: true });
 
       if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
-        return interaction.reply({ content: '❌ Slots full', ephemeral: true });
+        return interaction.reply({ content: '❌ All slots full', ephemeral: true });
 
-      const { key, expiry } = await createLuarmorKey(1, id);
+      // Show modal to ask how many credits to spend
+      const modal = new ModalBuilder()
+        .setCustomId('activate_modal')
+        .setTitle('Activate Slot');
 
-      const slot = slots.find(s => s.userId === id);
-      if (slot) {
-        slot.key = key;
-        slot.expiry = expiry;
-        slot.paused = false;
-        slot.remaining = null;
-      } else {
-        slots.push({ userId: id, key, expiry, paused: false, remaining: null });
-      }
+      const input = new TextInputBuilder()
+        .setCustomId('credits_amount')
+        .setLabel(`Credits to spend (1 credit = 1 hour)`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
 
-      users[id].credits -= 1;
-      saveUsers();
-      saveSlots();
+      const row = new ActionRowBuilder().addComponents(input);
+      modal.addComponents(row);
 
-      await interaction.reply({ content: `🔑 Your key: ${key}`, ephemeral: true });
+      return interaction.showModal(modal);
     }
 
     if (interaction.customId === 'slots') {
@@ -305,6 +301,53 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.replied) {
       return interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
     }
+  }
+});
+
+// ===== MODAL HANDLER =====
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  if (interaction.customId !== 'activate_modal') return;
+
+  const id = interaction.user.id;
+  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
+
+  const creditsToSpend = parseInt(interaction.fields.getTextInputValue('credits_amount'));
+  const userData = users[id];
+
+  if (!creditsToSpend || creditsToSpend > userData.credits)
+    return interaction.reply({ content: '❌ Invalid or insufficient credits', ephemeral: true });
+
+  if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
+    return interaction.reply({ content: '❌ All slots full', ephemeral: true });
+
+  try {
+    // 1 credit = 1 hour
+    const { key, expiry } = await createLuarmorKey(creditsToSpend, id);
+
+    const existingSlotIndex = slots.findIndex(s => s.userId === id && !s.paused);
+    if (existingSlotIndex !== -1) {
+      slots[existingSlotIndex] = { userId: id, key, expiry, paused: false, remaining: null };
+    } else {
+      slots.push({ userId: id, key, expiry, paused: false, remaining: null });
+    }
+
+    userData.credits -= creditsToSpend;
+
+    saveUsers();
+    saveSlots();
+
+    return interaction.reply({
+      content: `✅ Slot activated!\nKey: ${key}\nExpires in: ${formatTime(expiry - Date.now())}`,
+      ephemeral: true
+    });
+
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({
+      content: `❌ Luarmor Error:\n${err.message}`,
+      ephemeral: true
+    });
   }
 });
 

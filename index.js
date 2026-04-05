@@ -44,12 +44,12 @@ const commands = [
     .setDescription('Give credits to a user')
     .addUserOption(o =>
       o.setName('user')
-       .setDescription('The user to give credits to') // ✅ required
+       .setDescription('The user to give credits to')
        .setRequired(true)
     )
     .addIntegerOption(o =>
       o.setName('amount')
-       .setDescription('Amount of credits to give') // ✅ required
+       .setDescription('Amount of credits to give')
        .setRequired(true)
     ),
 
@@ -61,7 +61,7 @@ const commands = [
     .setDescription('Release a user’s slot')
     .addUserOption(o =>
       o.setName('user')
-       .setDescription('User whose slot to release') // ✅ required
+       .setDescription('User whose slot to release')
        .setRequired(true)
     ),
 ].map(c => c.toJSON());
@@ -151,83 +151,96 @@ client.on('interactionCreate', async interaction => {
 
   if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
-  // ===== PANEL =====
-  if (interaction.commandName === 'panel' && isAdmin(id)) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('activate').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
-    );
-
-    return interaction.reply({ embeds: [generateSlotsEmbed()], components: [row] });
-  }
-
-  // ===== GIVE CREDITS =====
-  if (interaction.commandName === 'givecredits' && isAdmin(id)) {
-    const target = interaction.options.getUser('user');
-    const amount = interaction.options.getInteger('amount');
-
-    if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
-    users[target.id].credits += amount;
-    saveUsers();
-
-    return interaction.reply(`✅ Gave ${amount} credits to ${target.tag}`);
-  }
-
-  // ===== PAUSE ALL =====
-  if (interaction.commandName === 'pauseall' && isAdmin(id)) {
-    const now = Date.now();
-    for (const slot of slots) {
-      if (slot && !slot.paused && slot.expiry > now) {
-        slot.remaining = slot.expiry - now;
-        slot.paused = true;
-
-        try {
-          await axios.delete(
-            `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
-            { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-          );
-        } catch {}
-      }
-    }
-    saveSlots();
-    return interaction.reply('⏸️ All slots paused');
-  }
-
-  // ===== UNPAUSE ALL =====
-  if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
-    for (const slot of slots) {
-      if (slot && slot.paused) {
-        const hours = Math.ceil(slot.remaining / 3600000);
-        const { key, expiry } = await createLuarmorKey(hours, slot.userId);
-
-        slot.key = key;
-        slot.expiry = expiry;
-        slot.paused = false;
-        slot.remaining = null;
-      }
-    }
-    saveSlots();
-    return interaction.reply('▶️ All slots restored');
-  }
-
-  // ===== RELEASE SLOT =====
-  if (interaction.commandName === 'releaseslot' && isAdmin(id)) {
-    const u = interaction.options.getUser('user');
-    const index = slots.findIndex(s => s.userId === u.id);
-    if (index === -1) return interaction.reply('❌ No slot');
-
-    try {
-      await axios.delete(
-        `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${u.id}`,
-        { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+  try {
+    // ===== PANEL =====
+    if (interaction.commandName === 'panel' && isAdmin(id)) {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('credits').setLabel('💰 Credits').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('activate').setLabel('⚡ Activate').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('slots').setLabel('📊 Slots').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
       );
-    } catch {}
 
-    slots.splice(index, 1);
-    saveSlots();
-    return interaction.reply(`✅ Released ${u.tag}`);
+      return interaction.reply({ embeds: [generateSlotsEmbed()], components: [row] });
+    }
+
+    // ===== GIVE CREDITS =====
+    if (interaction.commandName === 'givecredits' && isAdmin(id)) {
+      const target = interaction.options.getUser('user');
+      const amount = interaction.options.getInteger('amount');
+
+      if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
+      users[target.id].credits += amount;
+      saveUsers();
+
+      return interaction.reply(`✅ Gave ${amount} credits to ${target.tag}`);
+    }
+
+    // ===== PAUSE ALL =====
+    if (interaction.commandName === 'pauseall' && isAdmin(id)) {
+      const now = Date.now();
+      for (const slot of slots) {
+        if (slot && !slot.paused && slot.expiry > now) {
+          slot.remaining = slot.expiry - now;
+          slot.paused = true;
+
+          try {
+            await axios.delete(
+              `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${slot.userId}`,
+              { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+            );
+          } catch {}
+        }
+      }
+      saveSlots();
+      return interaction.reply('⏸️ All slots paused');
+    }
+
+    // ===== UNPAUSE ALL =====
+    if (interaction.commandName === 'unpauseall' && isAdmin(id)) {
+      for (const slot of slots) {
+        if (slot && slot.paused) {
+          const hours = Math.ceil(slot.remaining / 3600000);
+          const { key, expiry } = await createLuarmorKey(hours, slot.userId);
+
+          slot.key = key;
+          slot.expiry = expiry;
+          slot.paused = false;
+          slot.remaining = null;
+
+          // DM user with new key
+          try {
+            const userObj = await client.users.fetch(slot.userId);
+            await userObj.send(`🔑 Your new key: ${key}`);
+          } catch {}
+        }
+      }
+      saveSlots();
+      return interaction.reply('▶️ All slots restored');
+    }
+
+    // ===== RELEASE SLOT =====
+    if (interaction.commandName === 'releaseslot' && isAdmin(id)) {
+      const u = interaction.options.getUser('user');
+      const index = slots.findIndex(s => s.userId === u.id);
+      if (index === -1) return interaction.reply('❌ No slot');
+
+      try {
+        await axios.delete(
+          `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users/${u.id}`,
+          { headers: { Authorization: process.env.LUARMOR_API_KEY } }
+        );
+      } catch {}
+
+      slots.splice(index, 1);
+      saveSlots();
+      return interaction.reply(`✅ Released ${u.tag}`);
+    }
+  } catch (err) {
+    console.error(err);
+    if (!interaction.replied) {
+      return interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
+    }
   }
 });
 
@@ -238,52 +251,60 @@ client.on('interactionCreate', async interaction => {
   const id = interaction.user.id;
   if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
 
-  if (interaction.customId === 'credits') {
-    return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
-  }
-
-  if (interaction.customId === 'activate') {
-    if (users[id].credits <= 0)
-      return interaction.reply({ content: '❌ No credits', ephemeral: true });
-
-    if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
-      return interaction.reply({ content: '❌ Slots full', ephemeral: true });
-
-    const { key, expiry } = await createLuarmorKey(1, id);
-    const slot = slots.find(s => s.userId === id);
-
-    if (slot) {
-      slot.key = key;
-      slot.expiry = expiry;
-      slot.paused = false;
-    } else {
-      slots.push({ userId: id, key, expiry, paused: false, remaining: null });
+  try {
+    if (interaction.customId === 'credits') {
+      return interaction.reply({ content: `💰 ${users[id].credits} credits`, ephemeral: true });
     }
 
-    users[id].credits -= 1;
-    saveUsers();
-    saveSlots();
+    if (interaction.customId === 'activate') {
+      if (users[id].credits <= 0)
+        return interaction.reply({ content: '❌ No credits', ephemeral: true });
 
-    return interaction.reply({ content: `🔑 ${key}`, ephemeral: true });
-  }
+      if (slots.filter(s => !s.paused).length >= MAX_SLOTS)
+        return interaction.reply({ content: '❌ Slots full', ephemeral: true });
 
-  if (interaction.customId === 'slots') {
-    return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
-  }
+      const { key, expiry } = await createLuarmorKey(1, id);
 
-  if (interaction.customId === 'crypto') {
-    const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
-    const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
+      const slot = slots.find(s => s.userId === id);
+      if (slot) {
+        slot.key = key;
+        slot.expiry = expiry;
+        slot.paused = false;
+        slot.remaining = null;
+      } else {
+        slots.push({ userId: id, key, expiry, paused: false, remaining: null });
+      }
 
-    users[id].btc = btc.data.address;
-    users[id].ltc = ltc.data.address;
-    users[id].processed = [];
-    saveUsers();
+      users[id].credits -= 1;
+      saveUsers();
+      saveSlots();
 
-    return interaction.reply({
-      content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
-      ephemeral: true
-    });
+      await interaction.reply({ content: `🔑 Your key: ${key}`, ephemeral: true });
+    }
+
+    if (interaction.customId === 'slots') {
+      return interaction.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
+    }
+
+    if (interaction.customId === 'crypto') {
+      const btc = await axios.post(`https://api.blockcypher.com/v1/btc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
+      const ltc = await axios.post(`https://api.blockcypher.com/v1/ltc/main/addrs?token=${process.env.BLOCKCYPHER_TOKEN}`);
+
+      users[id].btc = btc.data.address;
+      users[id].ltc = ltc.data.address;
+      users[id].processed = [];
+      saveUsers();
+
+      return interaction.reply({
+        content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
+        ephemeral: true
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    if (!interaction.replied) {
+      return interaction.reply({ content: `❌ Error: ${err.message}`, ephemeral: true });
+    }
   }
 });
 

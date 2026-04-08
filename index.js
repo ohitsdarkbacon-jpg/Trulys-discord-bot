@@ -26,8 +26,8 @@ const SLOTS_FILE = './slots.json';
 let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
 
-const MAX_SLOTS = 10; // total global slots
-const CREDITS_PER_DAY = 5; // 5 credits = 1 day
+const MAX_SLOTS = 10;
+const CREDITS_PER_DAY = 5;
 
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 2)); }
@@ -84,7 +84,7 @@ async function createLuarmorKey(days, discordId) {
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.LUARMOR_API_KEY}`,
+          Authorization: process.env.LUARMOR_API_KEY, // no Bearer
           'Content-Type': 'application/json'
         }
       }
@@ -146,7 +146,6 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   const adminIds = process.env.ADMIN_IDS.split(',');
 
-  // Admin panel
   if (interaction.commandName === 'panel' && adminIds.includes(interaction.user.id)) {
     const embed = new EmbedBuilder()
       .setTitle('🔑 Slot Panel')
@@ -161,14 +160,12 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ embeds: [embed, generateSlotsEmbed()], components: [row] });
   }
 
-  // Check credits
   if (interaction.commandName === 'checkcredits' && adminIds.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
     return interaction.reply({ content: `💰 ${target.tag} has ${users[target.id].credits} credits.`, ephemeral: true });
   }
 
-  // Give credits
   if (interaction.commandName === 'givecredits' && adminIds.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
@@ -178,7 +175,6 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: `✅ Gave ${amount} credits to ${target.tag}`, ephemeral: true });
   }
 
-  // Remove credits
   if (interaction.commandName === 'removecredits' && adminIds.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('amount');
@@ -188,7 +184,6 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: `✅ Removed ${amount} credits from ${target.tag}`, ephemeral: true });
   }
 
-  // Release slot
   if (interaction.commandName === 'releaseslot' && adminIds.includes(interaction.user.id)) {
     const target = interaction.options.getUser('user');
     slots = slots.filter(s => s.userId !== target.id);

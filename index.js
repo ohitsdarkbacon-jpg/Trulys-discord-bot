@@ -55,7 +55,6 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
-// ===== REGISTER =====
 async function registerCommands() {
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
@@ -63,27 +62,36 @@ async function registerCommands() {
   );
 }
 
-// ===== LUARMOR =====
+// ===== LUARMOR (FIXED) =====
 async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
 
-  const res = await axios.post(
-    `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
-    { discord_id: discordId, auth_expire: expiryUnix },
-    { headers: { Authorization: process.env.LUARMOR_API_KEY } }
-  );
-
-  const findKey = obj => {
-    if (typeof obj === 'string' && /^[A-Za-z0-9]{6,}$/.test(obj)) return obj;
-    if (typeof obj === 'object') {
-      for (const v of Object.values(obj)) {
-        const k = findKey(v);
-        if (k) return k;
+  try {
+    const res = await axios.post(
+      `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
+      {
+        discord_id: discordId,
+        auth_expire: expiryUnix
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.LUARMOR_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
       }
-    }
-  };
+    );
 
-  return { key: findKey(res.data), expiry: expiryUnix * 1000 };
+    console.log("Luarmor:", res.data);
+
+    const key = res.data?.user?.key;
+    if (!key) throw new Error(JSON.stringify(res.data));
+
+    return { key, expiry: expiryUnix * 1000 };
+
+  } catch (err) {
+    console.error("Luarmor error:", err.response?.data || err.message);
+    throw new Error("Luarmor failed");
+  }
 }
 
 // ===== EMBED =====
@@ -137,7 +145,7 @@ client.on('interactionCreate', async i => {
 
     if (!users[target.id]) users[target.id] = { credits: 0 };
 
-    return i.reply({ content: `💰 ${target.tag}: ${users[target.id].credits} credits`, ephemeral: true });
+    return i.reply({ content: `💰 ${target.tag}: ${users[target.id].credits}`, ephemeral: true });
   }
 
   if (i.commandName === 'givecredits' && isAdmin) {
@@ -187,7 +195,7 @@ client.on('interactionCreate', async i => {
   if (i.customId === 'activate') {
     const modal = new ModalBuilder()
       .setCustomId('buy')
-      .setTitle('Activate');
+      .setTitle('Activate Slot');
 
     modal.addComponents(
       new ActionRowBuilder().addComponents(
@@ -195,6 +203,7 @@ client.on('interactionCreate', async i => {
           .setCustomId('credits')
           .setLabel('Credits (5 = 1 day)')
           .setStyle(TextInputStyle.Short)
+          .setRequired(true)
       )
     );
 
@@ -211,7 +220,10 @@ client.on('interactionCreate', async i => {
 
     saveUsers();
 
-    return i.reply({ content: `BTC: ${users[id].btc}\nLTC: ${users[id].ltc}`, ephemeral: true });
+    return i.reply({
+      content: `💳 Send crypto:\nBTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
+      ephemeral: true
+    });
   }
 });
 
@@ -223,10 +235,10 @@ client.on('interactionCreate', async i => {
   const user = users[i.user.id];
 
   if (!credits || credits > user.credits)
-    return i.reply({ content: 'Invalid credits', ephemeral: true });
+    return i.reply({ content: '❌ Invalid credits', ephemeral: true });
 
   if (credits % 5 !== 0)
-    return i.reply({ content: 'Must be multiple of 5', ephemeral: true });
+    return i.reply({ content: '❌ Must be multiple of 5', ephemeral: true });
 
   const hours = (credits / 5) * 24;
 
@@ -256,18 +268,21 @@ setInterval(async () => {
     for (const type of ['btc','ltc']) {
       if (!u[type]) continue;
 
-      const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${u[type]}`);
-      const txs = res.data.txrefs || [];
+      try {
+        const res = await axios.get(`https://api.blockcypher.com/v1/${type}/main/addrs/${u[type]}`);
+        const txs = res.data.txrefs || [];
 
-      for (const tx of txs) {
-        if (tx.confirmations < 1 || u.processed.includes(tx.tx_hash)) continue;
+        for (const tx of txs) {
+          if (tx.confirmations < 1 || u.processed.includes(tx.tx_hash)) continue;
 
-        const credits = Math.floor(tx.value / 100000);
-        if (credits > 0) {
-          u.credits += credits;
-          u.processed.push(tx.tx_hash);
+          const credits = Math.floor(tx.value / 100000);
+          if (credits > 0) {
+            u.credits += credits;
+            u.processed.push(tx.tx_hash);
+            console.log(`💰 Added ${credits} credits to ${id}`);
+          }
         }
-      }
+      } catch {}
     }
   }
 
@@ -276,7 +291,7 @@ setInterval(async () => {
 
 // ===== READY =====
 client.once('ready', async () => {
-  console.log('Bot ready');
+  console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
 });
 

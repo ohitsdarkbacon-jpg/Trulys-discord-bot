@@ -7,6 +7,7 @@ const {
 } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
+const https = require('https');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -21,7 +22,6 @@ const SLOTS_FILE = './slots.json';
 
 let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : {};
 let slots = fs.existsSync(SLOTS_FILE) ? JSON.parse(fs.readFileSync(SLOTS_FILE)) : [];
-
 let panelMessage = null;
 
 // ===== SAVE =====
@@ -30,25 +30,49 @@ function saveSlots() { fs.writeFileSync(SLOTS_FILE, JSON.stringify(slots, null, 
 
 // ===== COMMANDS =====
 const commands = [
-  new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
+  new SlashCommandBuilder().setName('panel').setDescription('Open the slots panel'),
   new SlashCommandBuilder()
     .setName('credits')
     .setDescription('Check credits')
-    .addUserOption(o => o.setName('user')),
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('User to check credits for')
+       .setRequired(false)
+    ),
   new SlashCommandBuilder()
     .setName('givecredits')
-    .setDescription('Give credits')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true)),
+    .setDescription('Give credits to a user')
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('Target user')
+       .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('amount')
+       .setDescription('Number of credits to give')
+       .setRequired(true)
+    ),
   new SlashCommandBuilder()
     .setName('removecredits')
-    .setDescription('Remove credits')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true)),
+    .setDescription('Remove credits from a user')
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('Target user')
+       .setRequired(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('amount')
+       .setDescription('Number of credits to remove')
+       .setRequired(true)
+    ),
   new SlashCommandBuilder()
     .setName('releaseslot')
-    .setDescription('Release slot')
-    .addUserOption(o => o.setName('user').setRequired(true))
+    .setDescription('Release a user slot')
+    .addUserOption(o =>
+      o.setName('user')
+       .setDescription('Target user to release slot')
+       .setRequired(true)
+    )
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -60,27 +84,25 @@ async function registerCommands() {
   );
 }
 
-// ===== LUARMOR =====
+// ===== LUARMOR KEY =====
 async function createLuarmorKey(hours, discordId) {
   const expiryUnix = Math.floor(Date.now() / 1000) + hours * 3600;
-
   const res = await axios({
-    method: "POST",
+    method: 'POST',
     url: `https://api.luarmor.net/v3/projects/${process.env.LUARMOR_PROJECT_ID}/users`,
     headers: {
       Authorization: `Bearer ${process.env.LUARMOR_API_KEY}`,
-      "Content-Type": "application/json"
+      'Content-Type': 'application/json'
     },
     data: { discord_id: discordId, auth_expire: expiryUnix }
   });
 
   const key = res.data?.user?.key;
-  if (!key) throw new Error("No key returned");
-
+  if (!key) throw new Error('No key returned from Luarmor');
   return { key, expiry: expiryUnix * 1000 };
 }
 
-// ===== EMBED =====
+// ===== SLOTS EMBED =====
 function generateSlotsEmbed() {
   const embed = new EmbedBuilder()
     .setTitle('🎟️ Global Slots')
@@ -89,17 +111,18 @@ function generateSlotsEmbed() {
 
   const now = Date.now();
   const active = slots.filter(s => s.expiry > now);
+  let desc = '';
 
-  let desc = "";
   for (let i = 0; i < MAX_SLOTS; i++) {
     const s = active[i];
     if (s) {
       const user = client.users.cache.get(s.userId);
-      desc += `**${i + 1}. 🔴 ${user ? user.tag : "Unknown"}**\n<t:${Math.floor(s.expiry/1000)}:R>\n\n`;
+      desc += `**${i + 1}. 🔴 ${user ? user.tag : 'Unknown'}**\n<t:${Math.floor(s.expiry/1000)}:R>\n\n`;
     } else {
       desc += `**${i + 1}. 🟢 Available**\n\n`;
     }
   }
+
   embed.setDescription(desc);
   return embed;
 }
@@ -117,22 +140,20 @@ client.on('interactionCreate', async i => {
       new ButtonBuilder().setCustomId('slots').setLabel('📊 Refresh').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('crypto').setLabel('💳 Crypto').setStyle(ButtonStyle.Success)
     );
-
-    const msg = await i.reply({ embeds: [embed], components: [row], fetchReply: true });
-    panelMessage = msg;
+    panelMessage = await i.reply({ embeds: [embed], components: [row], fetchReply: true });
   }
 
   if (i.commandName === 'credits') {
     const target = i.options.getUser('user') || i.user;
     if (target.id !== i.user.id && !isAdmin) return i.reply({ content: 'Admin only', ephemeral: true });
-    if (!users[target.id]) users[target.id] = { credits: 0, processed: [], btc: null, ltc: null };
-    return i.reply({ content: `${target.tag}: ${users[target.id].credits}`, ephemeral: true });
+    if (!users[target.id]) users[target.id] = { credits: 0, btc: null, ltc: null, processed: [] };
+    return i.reply({ content: `${target.tag}: ${users[target.id].credits} credits`, ephemeral: true });
   }
 
   if (i.commandName === 'givecredits' && isAdmin) {
     const u = i.options.getUser('user');
     const amt = i.options.getInteger('amount');
-    if (!users[u.id]) users[u.id] = { credits: 0, processed: [], btc: null, ltc: null };
+    if (!users[u.id]) users[u.id] = { credits: 0, btc: null, ltc: null, processed: [] };
     users[u.id].credits += amt;
     saveUsers();
     return i.reply(`Gave ${amt} credits to ${u.tag}`);
@@ -141,7 +162,7 @@ client.on('interactionCreate', async i => {
   if (i.commandName === 'removecredits' && isAdmin) {
     const u = i.options.getUser('user');
     const amt = i.options.getInteger('amount');
-    if (!users[u.id]) users[u.id] = { credits: 0, processed: [], btc: null, ltc: null };
+    if (!users[u.id]) users[u.id] = { credits: 0, btc: null, ltc: null, processed: [] };
     users[u.id].credits = Math.max(0, users[u.id].credits - amt);
     saveUsers();
     return i.reply(`Removed ${amt} credits from ${u.tag}`);
@@ -159,7 +180,7 @@ client.on('interactionCreate', async i => {
 client.on('interactionCreate', async i => {
   if (!i.isButton()) return;
   const id = i.user.id;
-  if (!users[id]) users[id] = { credits: 0, processed: [], btc: null, ltc: null };
+  if (!users[id]) users[id] = { credits: 0, btc: null, ltc: null, processed: [] };
 
   if (i.customId === 'credits') return i.reply({ content: `${users[id].credits} credits`, ephemeral: true });
   if (i.customId === 'slots') return i.reply({ embeds: [generateSlotsEmbed()], ephemeral: true });
@@ -168,7 +189,11 @@ client.on('interactionCreate', async i => {
     const modal = new ModalBuilder().setCustomId('buy').setTitle('Activate Slot');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('credits').setLabel('Credits (5 = 1 day)').setStyle(TextInputStyle.Short).setRequired(true)
+        new TextInputBuilder()
+          .setCustomId('credits')
+          .setLabel('Credits (5 = 1 day)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
       )
     );
     return i.showModal(modal);
@@ -182,10 +207,12 @@ client.on('interactionCreate', async i => {
       users[id].btc = btc.data.address;
       users[id].ltc = ltc.data.address;
       users[id].processed = [];
-
       saveUsers();
 
-      return i.reply({ content: `💳 Send crypto to get credits:\nBTC: ${users[id].btc}\nLTC: ${users[id].ltc}`, ephemeral: true });
+      return i.reply({
+        content: `💳 Send crypto to get credits:\nBTC: ${users[id].btc}\nLTC: ${users[id].ltc}`,
+        ephemeral: true
+      });
     } catch (err) {
       return i.reply({ content: `❌ Failed to generate wallets: ${err.message}`, ephemeral: true });
     }
@@ -206,17 +233,16 @@ client.on('interactionCreate', async i => {
 
   slots.push({ userId: i.user.id, expiry });
   user.credits -= credits;
-
   saveUsers();
   saveSlots();
 
   i.reply({ content: `✅ Activated\nKey: ${key}`, ephemeral: true });
 });
 
-// ===== AUTO SLOT CLEANUP =====
+// ===== AUTO CLEANUP =====
 setInterval(() => { slots = slots.filter(s => s.expiry > Date.now()); saveSlots(); }, 60000);
 
-// ===== AUTO CRYPTO CHECK =====
+// ===== AUTO CRYPTO =====
 setInterval(async () => {
   for (const id in users) {
     const u = users[id];
@@ -236,13 +262,21 @@ setInterval(async () => {
   saveUsers();
 }, 20000);
 
-// ===== AUTO PANEL UPDATE =====
+// ===== AUTO PANEL REFRESH =====
 setInterval(async () => { if (panelMessage) panelMessage.edit({ embeds: [generateSlotsEmbed()] }).catch(()=>{}); }, 10000);
 
 // ===== READY =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await registerCommands();
+
+  https.get('https://api.ipify.org?format=json', res => {
+    let data = '';
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => {
+      try { console.log('🌐 Outbound IP:', JSON.parse(data).ip); } catch {}
+    });
+  });
 });
 
 client.login(process.env.BOT_TOKEN);
